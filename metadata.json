@@ -1,0 +1,6 @@
+{
+  "name": "Greenville DIY Archive & Barter Market",
+  "description": "Upstate South Carolina and Carolinas DIY skate, underground music, 24-bit FLAC archive, and zero-fee artist barter market.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
