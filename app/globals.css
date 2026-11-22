@@ -1135,8 +1135,23 @@ html[data-contrast="dark"] .liquid-stage-shell {
 }
 
 /* ==========================================================================
-   CENTER-LOCKED VERTICAL PORTAL CHAIN TIMELINE
+   CHROMELESS ANALOG SLIDING-PORTAL TIMELINE (DATES ONLY · ZERO SCROLLBARS)
    ========================================================================== */
+html.timeline-chromeless-scroll,
+body.timeline-chromeless-scroll,
+.timeline-runway {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+html.timeline-chromeless-scroll::-webkit-scrollbar,
+body.timeline-chromeless-scroll::-webkit-scrollbar,
+.timeline-runway::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
 .timeline-knob-stage {
   position: sticky;
   top: 52px;
@@ -1146,80 +1161,46 @@ html[data-contrast="dark"] .liquid-stage-shell {
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 18px;
   width: 100%;
   overflow: hidden;
 }
 
-.timeline-fading-chain-line {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 50%;
-  width: 1px;
-  transform: translateX(-50%);
-  background: linear-gradient(
-    180deg,
-    transparent 0%,
-    var(--grid-hairline-strong) 18%,
-    var(--accent) 50%,
-    var(--grid-hairline-strong) 82%,
-    transparent 100%
-  );
-  opacity: 0.76;
-  pointer-events: none;
-  z-index: 0;
-}
-
-.timeline-chain-slot {
-  position: relative;
-  z-index: 1;
-  width: 100%;
-  max-width: 520px;
-  min-height: 430px;
+.timeline-date-whisper-slot {
+  min-height: 24px;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
-.timeline-chain-node {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 20px;
-  will-change: transform, opacity;
-  transition:
-    opacity 0.28s cubic-bezier(0.16, 1, 0.3, 1),
-    transform 0.34s cubic-bezier(0.16, 1, 0.3, 1),
-    visibility 0.28s;
+.timeline-date-whisper {
+  background: transparent;
+  border: none;
+  padding: 4px 8px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  color: var(--ink-mono);
+  opacity: 0.56;
+  transition: opacity 0.18s ease, color 0.18s ease;
 }
 
-.timeline-chain-node.is-active {
+.timeline-date-whisper:hover {
   opacity: 1;
-  visibility: visible;
-  pointer-events: auto;
-  transform: translateY(0) scale(1);
+  color: var(--ink-primary);
 }
 
-.timeline-chain-node.is-past {
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
-  transform: translateY(-44px) scale(0.96);
-}
-
-.timeline-chain-node.is-upcoming {
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
-  transform: translateY(44px) scale(0.96);
+.timeline-date-whisper:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
 }
 
 .porthole-ring {
-  width: 220px;
-  height: 220px;
+  width: 224px;
+  height: 224px;
   margin: 0 auto;
   padding: 10px;
   flex-shrink: 0;
@@ -1235,16 +1216,83 @@ html[data-contrast="dark"] .liquid-stage-shell {
   background: #0D1015;
 }
 
+.portal-analog-slide {
+  position: absolute;
+  inset: 0;
+  will-change: transform, opacity;
+  transition:
+    transform 0.56s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.42s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.portal-analog-slide.is-active {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate3d(0, 0, 0) scale(1);
+}
+
+.portal-analog-slide.is-past {
+  opacity: 0;
+  pointer-events: none;
+  transform: translate3d(0, -34%, 0) scale(1.08);
+}
+
+.portal-analog-slide.is-upcoming {
+  opacity: 0;
+  pointer-events: none;
+  transform: translate3d(0, 34%, 0) scale(1.08);
+}
+
+.timeline-card-slot {
+  position: relative;
+  width: 100%;
+  max-width: 540px;
+  min-height: 196px;
+}
+
+.timeline-card-layer {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  will-change: transform, opacity;
+  transition:
+    transform 0.52s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.38s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.timeline-card-layer.is-active {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate3d(0, 0, 0) scale(1);
+}
+
+.timeline-card-layer.is-past {
+  opacity: 0;
+  pointer-events: none;
+  transform: translate3d(0, -28px, 0) scale(0.985);
+}
+
+.timeline-card-layer.is-upcoming {
+  opacity: 0;
+  pointer-events: none;
+  transform: translate3d(0, 28px, 0) scale(0.985);
+}
+
 .timeline-era-card {
   width: 100%;
   padding: 20px 22px;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .timeline-chain-node,
-  .timeline-chain-node.is-past,
-  .timeline-chain-node.is-upcoming {
-    transition: opacity 0.15s linear, visibility 0.15s linear;
+  .portal-analog-slide,
+  .portal-analog-slide.is-past,
+  .portal-analog-slide.is-upcoming,
+  .timeline-card-layer,
+  .timeline-card-layer.is-past,
+  .timeline-card-layer.is-upcoming {
+    transition: opacity 0.15s linear;
     transform: none;
   }
 }
@@ -1589,13 +1637,16 @@ table.clean-table {
     top: 48px;
     height: calc(100vh - 114px);
     height: calc(100dvh - 114px);
-    gap: 14px;
+    gap: 12px;
   }
   .porthole-ring {
     width: 172px;
     height: 172px;
     padding: 9px;
     margin: 0 auto;
+  }
+  .timeline-card-slot {
+    min-height: 214px;
   }
   .timeline-era-card {
     padding: 16px 18px;

@@ -1,9 +1,11 @@
 -- ============================================================================
--- GREENVILLE DIY ARCHIVE & BARTER MARKET — HOSTINGER MYSQL SCHEMA (Pass 4)
--- Target Engine: MySQL 8.0+ / MariaDB 10.6+ (Auto-bootstrapped on first boot)
--- Connection: DB_HOST=127.0.0.1 (IPv4 TCP), DB_PORT=3306, connectionLimit=5
+-- GREENVILLE DIY ARCHIVE & BARTER MARKET — HOSTINGER MYSQL SCHEMA (Pass 7)
+-- Target Engine: MySQL 8.0+ / MariaDB 10.6+ (Auto-bootstrapped & migrated)
+-- Connection: DB_HOST=127.0.0.1 (IPv4 TCP), DB_PORT=3306, connectionLimit=5,
+--             multipleStatements=false, namedPlaceholders=false
 -- ============================================================================
 
+-- Read-only legacy snapshot safety backup (hydrated once on boot if relational tables are empty)
 CREATE TABLE IF NOT EXISTS archive_kv_snapshot (
   store_key VARCHAR(32) PRIMARY KEY,
   payload_json LONGTEXT NOT NULL,
@@ -48,8 +50,11 @@ CREATE TABLE IF NOT EXISTS flac_tracks (
   source_type VARCHAR(24) NOT NULL DEFAULT 'samply',
   source_id_or_url TEXT NOT NULL,
   flac_stream_url TEXT NOT NULL,
+  artwork_url MEDIUMTEXT NULL,
   samply_player_id VARCHAR(80) NULL,
   preview_root_hz DOUBLE NOT NULL DEFAULT 196.0,
+  loudness_lufs DOUBLE NULL,
+  alt_versions_json JSON NULL,
   waveform_peaks_json JSON NOT NULL,
   tags_json JSON NOT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -103,7 +108,8 @@ CREATE TABLE IF NOT EXISTS timeline_eras (
   dial_short_label VARCHAR(24) NOT NULL,
   title VARCHAR(220) NOT NULL,
   summary TEXT NOT NULL,
-  porthole_image_url MEDIUMTEXT NOT NULL
+  porthole_image_url MEDIUMTEXT NOT NULL,
+  INDEX idx_timeline_sort (sort_order)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS places_remembered (
@@ -130,7 +136,8 @@ CREATE TABLE IF NOT EXISTS auctions (
   ig_permalink TEXT NOT NULL,
   sold TINYINT(1) NOT NULL DEFAULT 0,
   tags_json JSON NOT NULL,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_auctions_ig_media (ig_media_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS comments (
@@ -138,6 +145,7 @@ CREATE TABLE IF NOT EXISTS comments (
   target_item_id VARCHAR(40) NOT NULL,
   author VARCHAR(80) NOT NULL,
   text_body TEXT NOT NULL,
+  timestamp_sec INT UNSIGNED NULL,
   votes INT NOT NULL DEFAULT 1,
   created_at_iso VARCHAR(40) NOT NULL,
   replies_json JSON NOT NULL,
@@ -158,7 +166,8 @@ CREATE TABLE IF NOT EXISTS scene_chat_messages (
   who_handle VARCHAR(60) NOT NULL,
   time_label VARCHAR(20) NOT NULL,
   msg_body VARCHAR(400) NOT NULL,
-  created_at_iso VARCHAR(40) NOT NULL
+  created_at_iso VARCHAR(40) NOT NULL,
+  INDEX idx_scene_chat_created (created_at_iso)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS puck_pages (
@@ -182,7 +191,25 @@ CREATE TABLE IF NOT EXISTS future_tasks (
   created_at_iso VARCHAR(40) NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Reserved for Pass 3 Task P3-04 (Zero-Cost Multi-Curator RBAC & Audit Trail)
+-- Security, Brute-Force Lockout & Session Revocation Tables (Pass 5 + Pass 7)
+CREATE TABLE IF NOT EXISTS admin_sessions (
+  session_id_hash CHAR(64) PRIMARY KEY,
+  created_at_iso VARCHAR(40) NOT NULL,
+  expires_at_ms BIGINT UNSIGNED NOT NULL,
+  revoked_at_iso VARCHAR(40) NULL,
+  ip_hash CHAR(64) NULL,
+  INDEX idx_admin_sessions_exp (expires_at_ms)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS auth_rate_limits (
+  bucket_key VARCHAR(128) PRIMARY KEY,
+  fail_count INT UNSIGNED NOT NULL DEFAULT 0,
+  window_start_ms BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  strike_level TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  locked_until_ms BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  updated_at_iso VARCHAR(40) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS curators (
   id VARCHAR(40) PRIMARY KEY,
   username VARCHAR(80) NOT NULL UNIQUE,
@@ -193,8 +220,11 @@ CREATE TABLE IF NOT EXISTS curators (
 
 CREATE TABLE IF NOT EXISTS audit_logs (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  curator_username VARCHAR(80) NOT NULL,
-  action_name VARCHAR(80) NOT NULL,
-  target_id VARCHAR(64) NULL,
+  created_at_iso VARCHAR(40) NULL,
+  curator_username VARCHAR(80) NOT NULL DEFAULT 'curator',
+  action_name VARCHAR(96) NOT NULL,
+  target_id VARCHAR(128) NULL,
+  ip_hash CHAR(64) NULL,
+  details_json JSON NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

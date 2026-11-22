@@ -1,5 +1,7 @@
 // app/api/media/drive/[fileId]/route.ts
 import { NextRequest, NextResponse } from 'next/server';
+import { verifyAdminSession } from '@/lib/dal/auth';
+import { archiveRepository } from '@/lib/storage/repository';
 
 /**
  * Authenticated Google Drive API v3 (`alt=media`) Streaming Proxy.
@@ -173,11 +175,27 @@ export async function GET(
   const { fileId } = await context.params;
   const cleanFileId = (fileId || '').trim();
 
-  if (!cleanFileId || !/^[a-zA-Z0-9_-]{4,}$/.test(cleanFileId)) {
-    return NextResponse.json({ error: 'Invalid Google Drive fileId' }, { status: 400 });
+  if (!cleanFileId || !/^[a-zA-Z0-9_-]{10,80}$/.test(cleanFileId)) {
+    return NextResponse.json(
+      { error: 'Invalid Google Drive fileId' },
+      { status: 400 }
+    );
   }
 
   try {
+    const isPublished = await archiveRepository.isPublishedDriveFileId(
+      cleanFileId
+    );
+    if (!isPublished) {
+      const isAdmin = await verifyAdminSession(req);
+      if (!isAdmin) {
+        return NextResponse.json(
+          { error: 'Drive media asset is not published in archive records' },
+          { status: 403 }
+        );
+      }
+    }
+
     const accessToken = await getDriveAccessToken();
 
     // Seamless Preview Fallback when GDRIVE_CLIENT_EMAIL is unset in AI Studio

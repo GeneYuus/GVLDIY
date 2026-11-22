@@ -2,11 +2,12 @@
 import { RuntimePostureSnapshot } from '@/types/archive';
 
 /**
- * Zero-Edit Runtime Posture Resolver
- * - Holds Port 3000, In-Memory Seed Store, and 1-Click Demo Unlock steady in AI Studio Preview
- *   whenever DB_HOST is left empty.
- * - Automatically switches to Hostinger MySQL (127.0.0.1:3306), Hostinger $PORT, and strict
- *   ADMIN_PASSKEY authentication the moment Hostinger hPanel environment variables are set.
+ * Zero-Edit Runtime Posture Resolver (Iteration 1 Security Hardened)
+ * - In development/preview (NODE_ENV !== 'production'), holds Port 3000, In-Memory Seed Store,
+ *   and 1-Click Demo Unlock steady when ADMIN_PASSWORD_HASH / ADMIN_PASSKEY are unset.
+ * - In production (NODE_ENV === 'production'), unconditionally disables Demo Unlock and TOFU
+ *   claiming, and fails closed (503) if ADMIN_PASSWORD_HASH / ADMIN_PASSKEY or a >= 32-char
+ *   ADMIN_SESSION_SECRET are missing.
  */
 export function isHostingerMysqlConfigured(): boolean {
   return Boolean(
@@ -34,22 +35,54 @@ export function resolveRuntimePort(): string {
 }
 
 export function isPreviewDemoUnlockAllowed(): boolean {
-  const isLiveProductionDb =
-    process.env.NODE_ENV === 'production' && isHostingerMysqlConfigured();
-  if (!isLiveProductionDb) {
-    return true;
+  if (process.env.NODE_ENV === 'production') {
+    return false;
   }
-  return !Boolean(process.env.ADMIN_PASSKEY?.trim());
+  return true;
+}
+
+export function validateProductionAuthConfig(): {
+  ok: boolean;
+  reason?: string;
+} {
+  if (process.env.NODE_ENV !== 'production') {
+    return { ok: true };
+  }
+
+  const hasPasswordHash = Boolean(process.env.ADMIN_PASSWORD_HASH?.trim());
+  const hasLegacyPasskey = Boolean(process.env.ADMIN_PASSKEY?.trim());
+  if (!hasPasswordHash && !hasLegacyPasskey) {
+    return {
+      ok: false,
+      reason:
+        'Curator gateway is locked until ADMIN_PASSWORD_HASH (or ADMIN_PASSKEY) is configured in environment variables.',
+    };
+  }
+
+  const sessionSecret = process.env.ADMIN_SESSION_SECRET?.trim() || '';
+  if (sessionSecret.length < 32) {
+    return {
+      ok: false,
+      reason:
+        'Curator gateway is locked until ADMIN_SESSION_SECRET is set to at least 32 random characters in environment variables.',
+    };
+  }
+
+  return { ok: true };
 }
 
 export function getRuntimePostureSnapshot(): RuntimePostureSnapshot {
   const mysqlReady = isHostingerMysqlConfigured();
   const host = resolveMysqlHost();
   const port = resolveMysqlPort();
-  const adminPasskeyConfigured = Boolean(process.env.ADMIN_PASSKEY?.trim());
-  const sessionSecretConfigured = Boolean(
-    process.env.ADMIN_SESSION_SECRET?.trim()
+  const adminPasswordHashConfigured = Boolean(
+    process.env.ADMIN_PASSWORD_HASH?.trim()
   );
+  const adminPasskeyConfigured =
+    adminPasswordHashConfigured || Boolean(process.env.ADMIN_PASSKEY?.trim());
+  const sessionSecret = process.env.ADMIN_SESSION_SECRET?.trim() || '';
+  const sessionSecretConfigured = sessionSecret.length >= 32;
+  const prodValidation = validateProductionAuthConfig();
   const driveProxyConfigured = Boolean(
     process.env.GDRIVE_CLIENT_EMAIL?.trim() &&
       process.env.GDRIVE_PRIVATE_KEY?.trim()
@@ -63,12 +96,19 @@ export function getRuntimePostureSnapshot(): RuntimePostureSnapshot {
   );
 
   return {
-    mode: mysqlReady ? 'hostinger-production' : 'preview-demo',
+    mode:
+      mysqlReady || process.env.NODE_ENV === 'production'
+        ? 'hostinger-production'
+        : 'preview-demo',
     activePort: resolveRuntimePort(),
     storageDriver: mysqlReady ? 'hostinger-mysql' : 'preview-memory',
-    mysqlHostDisplay: mysqlReady ? `${host}:${port}` : '127.0.0.1:3306 (awaiting env)',
+    mysqlHostDisplay: mysqlReady
+      ? `${host}:${port}`
+      : '127.0.0.1:3306 (awaiting env)',
     demoUnlockEnabled: isPreviewDemoUnlockAllowed(),
     adminPasskeyConfigured,
+    adminPasswordHashConfigured,
+    productionAuthReady: prodValidation.ok,
     sessionSecretConfigured,
     driveProxyConfigured,
     r2PublicDomain,

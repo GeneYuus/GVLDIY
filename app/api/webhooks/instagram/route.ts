@@ -1,58 +1,103 @@
 // app/api/webhooks/instagram/route.ts
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { archiveRepository } from '@/lib/storage/repository';
 
-async function verifyMetaSignature(
+const MAX_WEBHOOK_BYTES = 65536;
+
+function isConfiguredWebhookSecret(secret: string | undefined): secret is string {
+  const trimmed = secret?.trim() || '';
+  return Boolean(trimmed && trimmed !== 'replace-with-meta-app-secret');
+}
+
+function verifyMetaSignature(
   rawBody: string,
   headerSig: string | null
-): Promise<boolean> {
-  const secret = process.env.IG_WEBHOOK_APP_SECRET;
-  if (!secret || secret === 'replace-with-meta-app-secret') {
-    // Allow local/preview simulation when no Meta app secret is configured
-    return true;
+): boolean {
+  const secret = process.env.IG_WEBHOOK_APP_SECRET?.trim();
+  // Fail closed whenever IG_WEBHOOK_APP_SECRET is unset or placeholder
+  if (!isConfiguredWebhookSecret(secret)) {
+    return false;
   }
-  if (!headerSig || !headerSig.startsWith('sha256=')) return false;
 
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    'raw',
-    encoder.encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign']
-  );
-  const sig = await crypto.subtle.sign('HMAC', key, encoder.encode(rawBody));
-  const hex =
-    'sha256=' +
-    Array.from(new Uint8Array(sig))
-      .map((b) => b.toString(16).padStart(2, '0'))
-      .join('');
-  return hex === headerSig;
+  if (!headerSig || !headerSig.startsWith('sha256=')) {
+    return false;
+  }
+
+  const expectedHex =
+    'sha256=' + createHmac('sha256', secret).update(rawBody, 'utf8').digest('hex');
+
+  const expectedBuf = Buffer.from(expectedHex, 'utf8');
+  const candidateBuf = Buffer.from(headerSig.trim(), 'utf8');
+
+  if (expectedBuf.length !== candidateBuf.length) {
+    return false;
+  }
+
+  return timingSafeEqual(expectedBuf, candidateBuf);
 }
 
 export async function GET(req: NextRequest) {
+  const secret = process.env.IG_WEBHOOK_APP_SECRET?.trim();
+  if (!isConfiguredWebhookSecret(secret)) {
+    return NextResponse.json(
+      { error: 'Instagram webhook secret is not configured' },
+      { status: 403 }
+    );
+  }
+
   const mode = req.nextUrl.searchParams.get('hub.mode');
   const challenge = req.nextUrl.searchParams.get('hub.challenge');
-  const verifyToken = req.nextUrl.searchParams.get('hub.verify_token');
-  const expectedToken =
-    process.env.IG_VERIFY_TOKEN || 'greenville-diy-barter-verify';
+  const verifyToken = req.nextUrl.searchParams.get('hub.verify_token') || '';
+  const expectedToken = process.env.IG_VERIFY_TOKEN?.trim() || '';
 
   if (mode === 'subscribe' && challenge) {
-    if (verifyToken && verifyToken !== expectedToken) {
-      return NextResponse.json({ error: 'Invalid verify token' }, { status: 403 });
+    if (!expectedToken || !verifyToken) {
+      return NextResponse.json(
+        { error: 'Invalid verify token' },
+        { status: 403 }
+      );
+    }
+    const a = Buffer.from(expectedToken, 'utf8');
+    const b = Buffer.from(verifyToken, 'utf8');
+    if (a.length !== b.length || !timingSafeEqual(a, b)) {
+      return NextResponse.json(
+        { error: 'Invalid verify token' },
+        { status: 403 }
+      );
     }
     return new NextResponse(challenge, { status: 200 });
   }
-  return NextResponse.json({ status: 'Instagram Graph API comment webhook ready' });
+
+  return NextResponse.json({
+    status: 'Instagram Graph API comment webhook ready',
+  });
 }
 
 export async function POST(req: NextRequest) {
+  const secret = process.env.IG_WEBHOOK_APP_SECRET?.trim();
+  if (!isConfiguredWebhookSecret(secret)) {
+    return NextResponse.json(
+      { error: 'Instagram webhook signature secret is not configured' },
+      { status: 403 }
+    );
+  }
+
   try {
     const rawBody = await req.text();
+    if (Buffer.byteLength(rawBody, 'utf8') > MAX_WEBHOOK_BYTES) {
+      return NextResponse.json(
+        { error: 'Webhook payload too large' },
+        { status: 413 }
+      );
+    }
+
     const signature = req.headers.get('x-hub-signature-256');
-    const valid = await verifyMetaSignature(rawBody, signature);
-    if (!valid) {
-      return NextResponse.json({ error: 'Invalid Meta signature' }, { status: 403 });
+    if (!verifyMetaSignature(rawBody, signature)) {
+      return NextResponse.json(
+        { error: 'Invalid Meta signature' },
+        { status: 403 }
+      );
     }
 
     const payload = JSON.parse(rawBody);
@@ -64,7 +109,7 @@ export async function POST(req: NextRequest) {
       const changes = Array.isArray(entry.changes) ? entry.changes : [];
       for (const change of changes) {
         if (change.field === 'comments' && change.value) {
-          const mediaId = change.value.media?.id;
+          const mediaId = String(change.value.media?.id || '').trim();
           const fromUsername = String(change.value.from?.username || '')
             .trim()
             .replace(/^@/, '')
@@ -73,23 +118,29 @@ export async function POST(req: NextRequest) {
             .trim()
             .toUpperCase();
 
+          if (!mediaId || !fromUsername || !commentText.includes('SOLD')) {
+            continue;
+          }
+
           const matchingAuction = publicPayload.auctions.find(
             (a) =>
-              (mediaId && a.igMediaId === mediaId) ||
+              Boolean(mediaId && a.igMediaId === mediaId) &&
               a.ownerUsername.replace(/^@/, '').toLowerCase() === fromUsername
           );
 
-          if (
-            matchingAuction &&
-            matchingAuction.ownerUsername.replace(/^@/, '').toLowerCase() ===
-              fromUsername &&
-            commentText.includes('SOLD')
-          ) {
+          if (matchingAuction) {
             const res = await archiveRepository.markAuctionSoldByMediaOrId({
               auctionId: matchingAuction.id,
               sold: true,
             });
-            if (res) updatedItems.push(res);
+            if (res) {
+              await archiveRepository.recordAuditLog(
+                'IG_WEBHOOK_SOLD',
+                matchingAuction.id,
+                `@${fromUsername}`
+              );
+              updatedItems.push(res);
+            }
           }
         }
       }
@@ -101,6 +152,9 @@ export async function POST(req: NextRequest) {
       updatedItems,
     });
   } catch {
-    return NextResponse.json({ error: 'Malformed webhook payload' }, { status: 400 });
+    return NextResponse.json(
+      { error: 'Malformed webhook payload' },
+      { status: 400 }
+    );
   }
 }

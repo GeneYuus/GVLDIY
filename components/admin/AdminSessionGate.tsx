@@ -15,6 +15,7 @@ import AdminManagerClient from '@/components/admin/AdminManagerClient';
 interface AdminSessionGateProps {
   initialAdminData: AdminHydratedPayload | null;
   demoModeAvailable: boolean;
+  setupError?: string;
   seasonTheme: SeasonTheme;
   defaultContrast: ContrastMode;
 }
@@ -22,6 +23,7 @@ interface AdminSessionGateProps {
 export default function AdminSessionGate({
   initialAdminData,
   demoModeAvailable,
+  setupError,
   seasonTheme,
   defaultContrast,
 }: AdminSessionGateProps) {
@@ -47,7 +49,7 @@ export default function AdminSessionGate({
 
   // Hydrate via in-memory Bearer token when third-party iframe cookies are blocked
   useEffect(() => {
-    if (adminData || !memoryToken) return;
+    if (adminData || !memoryToken || setupError) return;
 
     let cancelled = false;
     adminFetch('/api/admin/auth')
@@ -66,7 +68,7 @@ export default function AdminSessionGate({
     return () => {
       cancelled = true;
     };
-  }, [adminData, memoryToken]);
+  }, [adminData, memoryToken, setupError]);
 
   if (adminData) {
     return (
@@ -77,7 +79,7 @@ export default function AdminSessionGate({
     );
   }
 
-  if (memoryToken && !resolvedTokenCheck) {
+  if (memoryToken && !resolvedTokenCheck && !setupError) {
     return (
       <div className="min-h-screen flex items-center justify-center font-mono text-xs text-[var(--mute)]">
         Loading Admin Manager...
@@ -88,6 +90,7 @@ export default function AdminSessionGate({
   return (
     <AdminLoginForm
       demoModeAvailable={demoModeAvailable}
+      setupError={setupError}
       onUnlocked={(payload) => setAdminData(payload)}
     />
   );

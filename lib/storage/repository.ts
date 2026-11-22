@@ -1,32 +1,36 @@
 // lib/storage/repository.ts
-import mysql, { Pool, RowDataPacket } from 'mysql2/promise';
+import type { Pool } from 'mysql2/promise';
 import {
   AdminSiteSettings,
   ArchiveDataset,
+  AuditLogEntry,
   CommentNode,
+  CommentReply,
   FlacRecording,
   FlacVersionSource,
+  FlyerPresetStyle,
   FutureTaskLedgerItem,
   InstagramAuctionItem,
   MediaSourceType,
   PhotoPlate,
   PuckPageRecord,
   PuckSerializedData,
+  RememberedPlace,
   RuntimePostureSnapshot,
   SceneArtist,
   SceneChatMessage,
   ShowCalendarEvent,
   SubscriberCsvRow,
   TaskStatus,
+  TimelineEra,
   VideoTape,
   VideoTimestamp,
 } from '@/types/archive';
 import {
   getRuntimePostureSnapshot,
   isHostingerMysqlConfigured,
-  resolveMysqlHost,
-  resolveMysqlPort,
 } from '@/lib/config/runtimeEnv';
+import { sanitizeScopedFlyerCss } from '@/lib/security/sanitize';
 import {
   IMG_BORO_GLASS,
   IMG_FUZZ_PEDAL,
@@ -39,6 +43,70 @@ import {
   extractYoutubeVideoId,
   resolveMediaUrl,
 } from '@/lib/media/resolveMediaUrl';
+import {
+  appendCommentReplySql,
+  appendSceneChatSql,
+  countTableRowsSql,
+  deleteArtistSql,
+  deleteAuctionSql,
+  deleteCalendarShowSql,
+  deleteCommentSql,
+  deleteFlacSql,
+  deleteFutureTaskSql,
+  deleteOrClearPuckPageSql,
+  deletePhotoSql,
+  deletePlaceSql,
+  deleteSceneChatSql,
+  deleteSubscriberSql,
+  deleteTimelineEraSql,
+  deleteVideoSql,
+  fetchAdminDatasetSql,
+  fetchLivePollSnapshotSql,
+  fetchPublicPayloadSql,
+  findAuctionByMediaOrIdSql,
+  getArtistByIdSql,
+  getAuctionByIdSql,
+  getCalendarShowByIdSql,
+  getFlacByIdSql,
+  getPhotoByIdSql,
+  getPlaceByIdSql,
+  getPuckPageBySlugSql,
+  getReadyMysqlPool,
+  getSiteSettingsSql,
+  getSubscriberByIdSql,
+  getTimelineEraByIdSql,
+  getVideoByIdSql,
+  insertArtistSql,
+  insertAuctionSql,
+  insertCalendarShowSql,
+  insertCommentSql,
+  insertFlacSql,
+  insertFutureTaskSql,
+  insertPhotoSql,
+  insertPlaceSql,
+  insertSubscriberSql,
+  insertTimelineEraSql,
+  insertVideoSql,
+  insertAuditLogSql,
+  isPublishedDriveFileIdSql,
+  listAuditLogsSql,
+  listPuckPagesSql,
+  listSubscribersSql,
+  reorderTimelineErasSql,
+  updateArtistSql,
+  updateAuctionSql,
+  updateCalendarShowSql,
+  updateFlacSql,
+  updateFutureTaskStatusSql,
+  updatePhotoSql,
+  updatePlaceSql,
+  updateSubscriberSql,
+  updateTimelineEraSql,
+  updateVideoSql,
+  upsertPuckPageSql,
+  upsertSiteSettingsSql,
+  voteCommentAtomicSql,
+} from '@/lib/storage/mysqlRelationalDriver';
 
 const SEED_PUCK_PAGES: PuckPageRecord[] = [
   {
@@ -496,6 +564,7 @@ const INITIAL_SEED: ArchiveDataset = {
       summary:
         'Constructed in 1896 on Greenville’s west side; ran 80 years until Burlington Industries closed the gates in 1977.',
       portholeImageUrl: IMG_POE_MILL,
+      sortOrder: 0,
     },
     {
       id: 'ERA-02',
@@ -505,6 +574,7 @@ const INITIAL_SEED: ArchiveDataset = {
       summary:
         'Fires left only brick smokestacks and concrete slabs. Skaters cleared rubble by hand and poured Greenville’s DIY park.',
       portholeImageUrl: IMG_POE_MILL,
+      sortOrder: 1,
     },
     {
       id: 'ERA-03',
@@ -514,6 +584,7 @@ const INITIAL_SEED: ArchiveDataset = {
       summary:
         'When Greenville’s indoor wooden skateparks closed, self-built concrete at Poe Mill became the scene’s permanent anchor.',
       portholeImageUrl: IMG_POE_MILL,
+      sortOrder: 2,
     },
     {
       id: 'ERA-04',
@@ -523,6 +594,7 @@ const INITIAL_SEED: ArchiveDataset = {
       summary:
         'After Curly Blue could not get booked at Radio Room, practice sessions inside The Barn turned into full underground bills.',
       portholeImageUrl: IMG_THE_BARN,
+      sortOrder: 3,
     },
     {
       id: 'ERA-05',
@@ -532,6 +604,7 @@ const INITIAL_SEED: ArchiveDataset = {
       summary:
         'Skyler’s Craigslist musician post and friendships forged at Poe (Chandler, B-Man, Zach of Rocco & His Bones) carried The Barn forward.',
       portholeImageUrl: IMG_THE_BARN,
+      sortOrder: 4,
     },
     {
       id: 'ERA-06',
@@ -541,6 +614,7 @@ const INITIAL_SEED: ArchiveDataset = {
       summary:
         'The 2021 Poe Mill land sale and Dec 2024 loss of The Velo Fellow sparked an urgent push to preserve tapes, film, and stories.',
       portholeImageUrl: IMG_VELO_STAGE,
+      sortOrder: 5,
     },
     {
       id: 'ERA-07',
@@ -550,6 +624,7 @@ const INITIAL_SEED: ArchiveDataset = {
       summary:
         'Fast, mobile-first archive uniting Upstate SC & Asheville bands, lossless FLAC recordings, custom show flyers, and 0%-fee artist auctions.',
       portholeImageUrl: IMG_THE_BARN,
+      sortOrder: 6,
     },
   ],
   remembered: [
@@ -762,6 +837,90 @@ const INITIAL_SEED: ArchiveDataset = {
   ],
   futureTasks: [
     {
+      id: 'IT-01',
+      passPhase: 'Pass 5',
+      title:
+        'Async scrypt (64 MiB), Fail-Closed Prod Auth, MySQL Lockout, Revocable admin_sessions & Signed IG Webhook',
+      area: 'Auth & Security',
+      priority: 'P0',
+      status: 'Completed',
+      rationale:
+        'Shipped in Iteration 1 (Pass 5): async crypto.scrypt (N=65536, r=8, p=2) with max-2 semaphore, 5-try progressive lockout (15m/1h/24h) + 450ms floor, SHA-256 revocable admin_sessions, universal CSRF parity, __Host- SameSite=Strict prod cookies, and constant-time signed IG webhooks.',
+      prerequisite:
+        'Active now; generate ADMIN_PASSWORD_HASH in 07. Cutover & Next Pass before Hostinger deploy.',
+      createdAtIso: '2026-11-21T07:45:00Z',
+    },
+    {
+      id: 'IT-02',
+      passPhase: 'Pass 5',
+      title:
+        'Drive fileId Allowlist, Public Chat/Vote/Contact Rate Limits, CSV Formula Escape & CSP Headers',
+      area: 'Auth & Security',
+      priority: 'P0',
+      status: 'Completed',
+      rationale:
+        'Shipped in Iteration 1 (Pass 5): published-record Google Drive fileId allowlist, 8 KB public JSON cap + 6 writes/min IP rate limit + IP+comment vote dedup, CSV formula prefix protection,picsum removal, and CSP / nosniff / prod admin X-Frame-Options: DENY headers.',
+      prerequisite:
+        'Active automatically across public API routes, CSV export, and Next.js response headers.',
+      createdAtIso: '2026-11-21T07:45:00Z',
+    },
+    {
+      id: 'IT-03',
+      passPhase: 'Pass 6',
+      title:
+        'Modularize AdminManagerClient.tsx + Full Post-Entry [ EDIT ] CRUD (Including Timeline, Remembered & Any-Year Calendar)',
+      area: 'UI & Media',
+      priority: 'P0',
+      status: 'Completed',
+      rationale:
+        'Shipped in Iteration 2 (Pass 6): modular < 550-line Admin panels, 01–08 curator rail with 04. Timeline & Places, inline Soft 3D Frosted Glass [ EDIT ] drawers across all 9 collections, Scene Chat moderation, and full YYYY-MM-DD multi-year calendar show support.',
+      prerequisite:
+        'Active across /admin tabs 01–08 and /api/admin/actions with live audit_logs tracking.',
+      createdAtIso: '2026-11-21T07:45:00Z',
+    },
+    {
+      id: 'IT-04',
+      passPhase: 'Pass 7',
+      title:
+        'Migrate MySQL Driver from Single-Row archive_kv_snapshot Blob to Atomic Row-Level Relational SQL + Schema Sync',
+      area: 'Hostinger MySQL',
+      priority: 'P1',
+      status: 'Completed',
+      rationale:
+        'Shipped in Iteration 3 (Pass 7): retired single-row archive_kv_snapshot overwrites in favor of direct ?-parameterized row-level SQL across all 15 relational tables, added idempotent INFORMATION_SCHEMA column migrations (artwork_url, loudness_lufs, alt_versions_json, timestamp_sec), atomic comment vote increments, 200-row scene chat cap, and indefinite audit_logs retention while preserving archive_kv_snapshot untouched as a read-only backup.',
+      prerequisite:
+        'Active automatically whenever DB_HOST, DB_USER, and DB_NAME are configured.',
+      createdAtIso: '2026-11-21T07:45:00Z',
+    },
+    {
+      id: 'IT-05',
+      passPhase: 'Pass 8',
+      title:
+        'Chromeless Analog Sliding-Portal 3D Glass Timeline, Puck/Auction URL & Flyer CSS Sanitizers & Any-Month Calendar',
+      area: 'Puck Visual Studio',
+      priority: 'P1',
+      status: 'Completed',
+      rationale:
+        'Shipped in Iteration 4 (Pass 8): chromeless scrollbar-free analog sliding-portal 3D frosted glass timeline guided solely by archival dates over a single active-only card slot, unrestricted any-month/year show calendar navigation, centralized sanitizeSafeHref + sanitizeScopedFlyerCss guards, and finalized Hostinger + Cloudflare WAF cutover docs.',
+      prerequisite:
+        'Active across 05. Calendar, 06. Timeline, 08. Auctions, Puck Visual Studio, and HOSTINGER_CUTOVER.md.',
+      createdAtIso: '2026-11-21T07:45:00Z',
+    },
+    {
+      id: 'IT-06',
+      passPhase: 'Hostinger',
+      title:
+        'Live hPanel Env Secrets (ADMIN_PASSWORD_HASH, ADMIN_SESSION_SECRET, DB_HOST=127.0.0.1), Cloudflare Edge WAF & Nightly R2 Backup',
+      area: 'Hostinger MySQL',
+      priority: 'P0',
+      status: 'Deferred',
+      rationale:
+        'Final live cutover: provision Hostinger MySQL credentials, paste 16+ char ADMIN_PASSWORD_HASH & 64-hex ADMIN_SESSION_SECRET, lock Remote MySQL, and attach Cloudflare WAF.',
+      prerequisite:
+        'Set Hostinger hPanel Node.js environment variables and point greenvillediyarchive.org DNS.',
+      createdAtIso: '2026-11-21T07:45:00Z',
+    },
+    {
       id: 'P5-01',
       passPhase: 'Pass 5',
       title: 'Built-In Puck Visual Studio (@puckeditor/core), Inline Slots & /p/[slug] Pages',
@@ -771,7 +930,7 @@ const INITIAL_SEED: ArchiveDataset = {
       rationale:
         'Shipped in Pass 5: 6 flatter frosted-glass blocks, native slot multi-column nesting, sandboxed HTML zine frames, 3 inline tab slots, and /p/[slug] RSC pages.',
       prerequisite:
-        'Active in /admin -> 1. Visual Studio and /admin/editor/[slug].',
+        'Active in /admin -> 01. Visual Studio and /admin/editor/[slug].',
       createdAtIso: '2026-11-20T09:00:00Z',
     },
     {
@@ -787,310 +946,49 @@ const INITIAL_SEED: ArchiveDataset = {
         'Active automatically whenever leaving Audio with an active session.',
       createdAtIso: '2026-11-20T09:00:00Z',
     },
-    {
-      id: 'P5-03',
-      passPhase: 'Pass 5',
-      title: 'Multi-Take A/B Mix Admin Uploader & Browser LUFS Analyzer',
-      area: 'UI & Media',
-      priority: 'P2',
-      status: 'Completed',
-      rationale:
-        'Shipped in Pass 5: repeatable alternate mix take inputs in /admin plus client-side 72-bar RMS & integrated LUFS loudness decoding.',
-      prerequisite:
-        'Active in /admin -> Media & Archive CRUD -> 24-Bit FLAC Audio.',
-      createdAtIso: '2026-11-20T09:00:00Z',
-    },
-    {
-      id: 'P5-04',
-      passPhase: 'Hostinger',
-      title: 'Hostinger Local MySQL (127.0.0.1:3306) Live Credential Cutover',
-      area: 'Hostinger MySQL',
-      priority: 'P0',
-      status: 'Planned',
-      rationale:
-        'ensureSchemaInitialized() auto-creates all tables (including puck_pages) on first boot; live cutover only requires hPanel database credentials.',
-      prerequisite:
-        'Create MySQL DB in hPanel -> Databases and set DB_HOST=127.0.0.1, DB_PORT=3306, DB_USER, DB_PASSWORD, DB_NAME in Hostinger Environment Variables.',
-      createdAtIso: '2026-11-20T09:00:00Z',
-    },
-    {
-      id: 'P5-05',
-      passPhase: 'Storage / CDN',
-      title: 'Google Drive Service Account API v3 + Cloudflare R2 Production Keys',
-      area: 'Google Drive / R2',
-      priority: 'P0',
-      status: 'Planned',
-      rationale:
-        'Range proxy and preview fallbacks are compiled in; live 24-bit FLAC and 35mm streaming needs the curator Drive folder service account.',
-      prerequisite:
-        'Share Greenville_DIY_Media Drive folder with Service Account and set GDRIVE_CLIENT_EMAIL & GDRIVE_PRIVATE_KEY (plus Cloudflare edge DNS).',
-      createdAtIso: '2026-11-20T09:00:00Z',
-    },
-    {
-      id: 'P5-06',
-      passPhase: 'Pass 6',
-      title: 'Meta Graph API App Review for Live Instagram "SOLD" Webhooks',
-      area: 'IG Webhooks',
-      priority: 'P1',
-      status: 'Deferred',
-      rationale:
-        'HMAC verification and 8-second client auction polling are active, but live Instagram comment events require Meta business approval.',
-      prerequisite:
-        'Approve instagram_business_manage_comments in Meta Developer Portal and set IG_WEBHOOK_APP_SECRET & IG_VERIFY_TOKEN on thebartermarket.org.',
-      createdAtIso: '2026-11-20T09:00:00Z',
-    },
-    {
-      id: 'P6-01',
-      passPhase: 'Pass 6',
-      title: 'Cross-Browser WebGPU / WebGL2 Background-Capture Refraction for Safari & Firefox',
-      area: 'UI & Media',
-      priority: 'P1',
-      status: 'Deferred',
-      rationale:
-        'Chromium renders full Snell’s-law SVG feDisplacementMap backdrop refraction today; WebKit/Gecko require a multi-pass WebGPU/WebGL2 background capture pass beyond CSS backdrop-filter.',
-      prerequisite:
-        'Evaluate lightweight canvas snapshot shader pass once Safari/Firefox expose native SVG backdrop-filter or offscreen DOM capture.',
-      createdAtIso: '2026-11-20T12:00:00Z',
-    },
-    {
-      id: 'P6-02',
-      passPhase: 'Pass 6',
-      title: 'Mobile Hardware Gyroscope 3D Specular Tilt Reflection',
-      area: 'UI & Media',
-      priority: 'P2',
-      status: 'Deferred',
-      rationale:
-        'iOS Safari blocks DeviceOrientationEvent streams unless triggered from an explicit user permission modal; desktop/touch pointer sheen is active now without arrival popups.',
-      prerequisite:
-        'Add opt-in motion calibration toggle inside Audio/Timeline settings for handheld specular tilt.',
-      createdAtIso: '2026-11-20T12:00:00Z',
-    },
-    {
-      id: 'P6-03',
-      passPhase: 'Pass 6',
-      title: 'Custom External-Label Field Renderers Inside @puckeditor/core Inspector',
-      area: 'Puck Visual Studio',
-      priority: 'P2',
-      status: 'Deferred',
-      rationale:
-        'All public archive drawers and all 7 Admin Manager tabs now enforce stacked external monospace labels; overriding internal third-party Puck sidebar inputs requires custom fieldTypes adapters.',
-      prerequisite:
-        'Map Puck fieldTypes (text, textarea, number, select) to .field-group / .field-label in puck.config.tsx.',
-      createdAtIso: '2026-11-20T12:00:00Z',
-    },
-    {
-      id: 'P6-04',
-      passPhase: 'Pass 6',
-      title: 'Off-Hostinger Worker for Server-Side FFmpeg HLS/FLAC Segmenting',
-      area: 'UI & Media',
-      priority: 'P2',
-      status: 'Deferred',
-      rationale:
-        'Cannot run FFmpeg child processes inside Hostinger Business Web Hosting’s 120 NPROC limit; client Web Audio peak/LUFS analysis covers current uploads.',
-      prerequisite:
-        'Optional Cloudflare Worker / external transcode job if adaptive HLS manifests are needed later.',
-      createdAtIso: '2026-11-20T09:00:00Z',
-    },
   ],
 };
 
+const PREVIEW_SCENE_CHAT_MAX_STORED = 200;
+const PREVIEW_SCENE_CHAT_DISPLAY = 40;
+
 const globalForArchive = globalThis as unknown as {
   __gvlDiyStore?: ArchiveDataset;
-  __gvlMysqlPool?: Pool;
-  __gvlMysqlHydrated?: boolean;
+  __gvlAuditLogs?: AuditLogEntry[];
 };
 
 function isMysqlConfigured(): boolean {
   return isHostingerMysqlConfigured();
 }
 
-function getMysqlPool(): Pool | null {
-  if (!isMysqlConfigured()) return null;
-  if (!globalForArchive.__gvlMysqlPool) {
-    const host = resolveMysqlHost();
-    globalForArchive.__gvlMysqlPool = mysql.createPool({
-      host,
-      port: resolveMysqlPort(),
-      user: process.env.DB_USER!.trim(),
-      password: process.env.DB_PASSWORD || '',
-      database: process.env.DB_NAME!.trim(),
-      waitForConnections: true,
-      connectionLimit: 5, // Tuned for Hostinger Business Web Hosting 120 NPROC budget
-      queueLimit: 0,
-    });
+/**
+ * Singleton MySQL Pool + Idempotent Relational Schema & One-Time Boot Hydration:
+ * Used by both `archiveRepository` and `lib/dal/auth.ts`.
+ */
+export async function getInitializedMysqlPool(): Promise<Pool | null> {
+  return getReadyMysqlPool(INITIAL_SEED);
+}
+
+function getPreviewAuditLogs(): AuditLogEntry[] {
+  if (!globalForArchive.__gvlAuditLogs) {
+    globalForArchive.__gvlAuditLogs = [
+      {
+        id: 'audit-boot-1',
+        curatorUsername: 'system',
+        actionName: 'SECURITY_POSTURE_READY',
+        targetId: 'IT-01..IT-05',
+        createdAtIso: '2026-11-21T07:45:00Z',
+      },
+    ];
   }
-  return globalForArchive.__gvlMysqlPool;
+  return globalForArchive.__gvlAuditLogs;
 }
 
 /**
- * Zero-Touch Hostinger MySQL Auto-Bootstrap (`ensureSchemaInitialized`):
- * Automatically creates all relational & snapshot tables on first connection per boot
- * so deploying to Hostinger Node.js Web Apps requires zero manual SQL imports.
+ * In-memory preview dataset used strictly when `DB_HOST` is empty (preview mode)
+ * or if the MySQL socket is temporarily unreachable.
  */
-async function ensureSchemaInitialized(pool: Pool): Promise<void> {
-  const ddlStatements = [
-    `CREATE TABLE IF NOT EXISTS archive_kv_snapshot (
-      store_key VARCHAR(32) PRIMARY KEY,
-      payload_json LONGTEXT NOT NULL,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-    `CREATE TABLE IF NOT EXISTS site_config (
-      id TINYINT UNSIGNED PRIMARY KEY DEFAULT 1,
-      season_theme VARCHAR(16) NOT NULL DEFAULT 'fall',
-      default_contrast VARCHAR(16) NOT NULL DEFAULT 'light',
-      archive_submission_email VARCHAR(180) NOT NULL DEFAULT 'submissions@greenvillediyarchive.org',
-      calendar_submission_email VARCHAR(180) NOT NULL DEFAULT 'calendar@greenvillediyarchive.org',
-      auction_submission_email VARCHAR(180) NOT NULL DEFAULT 'auctions@thebartermarket.org',
-      updated_at_iso VARCHAR(40) NOT NULL
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-    `CREATE TABLE IF NOT EXISTS videos (
-      id VARCHAR(40) PRIMARY KEY,
-      slug VARCHAR(160) NOT NULL,
-      title VARCHAR(220) NOT NULL,
-      recorded_date VARCHAR(20) NOT NULL,
-      venue VARCHAR(140) NOT NULL,
-      filmer VARCHAR(120) NOT NULL,
-      youtube_unlisted_id VARCHAR(32) NOT NULL,
-      poster_url MEDIUMTEXT NOT NULL,
-      timestamps_json JSON NOT NULL,
-      tags_json JSON NOT NULL,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-    `CREATE TABLE IF NOT EXISTS flac_tracks (
-      id VARCHAR(40) PRIMARY KEY,
-      slug VARCHAR(160) NOT NULL,
-      title VARCHAR(220) NOT NULL,
-      artist VARCHAR(160) NOT NULL,
-      venue VARCHAR(140) NOT NULL,
-      recorded_date VARCHAR(20) NOT NULL,
-      duration_sec INT UNSIGNED NOT NULL DEFAULT 180,
-      bit_depth TINYINT UNSIGNED NOT NULL DEFAULT 24,
-      sample_rate_hz INT UNSIGNED NOT NULL DEFAULT 48000,
-      spec_label VARCHAR(80) NOT NULL,
-      source_type VARCHAR(24) NOT NULL DEFAULT 'samply',
-      source_id_or_url TEXT NOT NULL,
-      flac_stream_url TEXT NOT NULL,
-      samply_player_id VARCHAR(80) NULL,
-      preview_root_hz DOUBLE NOT NULL DEFAULT 196.0,
-      waveform_peaks_json JSON NOT NULL,
-      tags_json JSON NOT NULL,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-    `CREATE TABLE IF NOT EXISTS photos (
-      id VARCHAR(40) PRIMARY KEY,
-      title VARCHAR(220) NOT NULL,
-      photographer VARCHAR(120) NOT NULL,
-      venue VARCHAR(140) NOT NULL,
-      year_label VARCHAR(16) NOT NULL,
-      source_type VARCHAR(24) NOT NULL DEFAULT 'embedded',
-      source_id_or_url TEXT NULL,
-      dimensions_label VARCHAR(80) NULL,
-      image_url MEDIUMTEXT NOT NULL,
-      tags_json JSON NOT NULL,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-    `CREATE TABLE IF NOT EXISTS artists (
-      id VARCHAR(40) PRIMARY KEY,
-      name VARCHAR(160) NOT NULL,
-      role VARCHAR(40) NOT NULL,
-      genre VARCHAR(140) NOT NULL,
-      area VARCHAR(120) NOT NULL,
-      active TINYINT(1) NOT NULL DEFAULT 1,
-      tags_json JSON NOT NULL,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-    `CREATE TABLE IF NOT EXISTS calendar_shows (
-      id VARCHAR(40) PRIMARY KEY,
-      iso_date VARCHAR(20) NOT NULL,
-      month_key VARCHAR(10) NOT NULL,
-      day_of_month TINYINT UNSIGNED NOT NULL,
-      title VARCHAR(220) NOT NULL,
-      venue VARCHAR(140) NOT NULL,
-      doors_info VARCHAR(120) NOT NULL,
-      flyer_style VARCHAR(32) NOT NULL DEFAULT 'punk-xerox',
-      flyer_headline_note TEXT NOT NULL,
-      scoped_custom_css TEXT NULL,
-      tags_json JSON NOT NULL,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      INDEX idx_calendar_month (month_key)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-    `CREATE TABLE IF NOT EXISTS places_remembered (
-      id VARCHAR(40) PRIMARY KEY,
-      name VARCHAR(180) NOT NULL,
-      closed_sort_iso VARCHAR(20) NOT NULL,
-      closed_display_label VARCHAR(60) NOT NULL,
-      location VARCHAR(160) NOT NULL,
-      image_url MEDIUMTEXT NOT NULL,
-      memorial_story TEXT NOT NULL,
-      tags_json JSON NOT NULL
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-    `CREATE TABLE IF NOT EXISTS auctions (
-      id VARCHAR(40) PRIMARY KEY,
-      title VARCHAR(220) NOT NULL,
-      owner_username VARCHAR(80) NOT NULL,
-      current_bid_label VARCHAR(120) NOT NULL,
-      pickup_area VARCHAR(140) NOT NULL,
-      source_type VARCHAR(24) NOT NULL DEFAULT 'embedded',
-      source_id_or_url TEXT NULL,
-      image_url MEDIUMTEXT NOT NULL,
-      ig_media_id VARCHAR(64) NULL,
-      ig_permalink TEXT NOT NULL,
-      sold TINYINT(1) NOT NULL DEFAULT 0,
-      tags_json JSON NOT NULL,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-    `CREATE TABLE IF NOT EXISTS comments (
-      id VARCHAR(40) PRIMARY KEY,
-      target_item_id VARCHAR(40) NOT NULL,
-      author VARCHAR(80) NOT NULL,
-      text_body TEXT NOT NULL,
-      votes INT NOT NULL DEFAULT 1,
-      created_at_iso VARCHAR(40) NOT NULL,
-      replies_json JSON NOT NULL,
-      INDEX idx_comments_target (target_item_id)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-    `CREATE TABLE IF NOT EXISTS subscribers (
-      id VARCHAR(40) PRIMARY KEY,
-      created_at_iso VARCHAR(40) NOT NULL,
-      source VARCHAR(32) NOT NULL,
-      name VARCHAR(140) NOT NULL,
-      email VARCHAR(190) NOT NULL,
-      interests TEXT NOT NULL
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-    `CREATE TABLE IF NOT EXISTS scene_chat_messages (
-      id VARCHAR(40) PRIMARY KEY,
-      who_handle VARCHAR(60) NOT NULL,
-      time_label VARCHAR(20) NOT NULL,
-      msg_body VARCHAR(400) NOT NULL,
-      created_at_iso VARCHAR(40) NOT NULL
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-    `CREATE TABLE IF NOT EXISTS puck_pages (
-      slug VARCHAR(120) PRIMARY KEY,
-      title VARCHAR(255) NOT NULL,
-      is_slot TINYINT(1) NOT NULL DEFAULT 0,
-      published TINYINT(1) NOT NULL DEFAULT 1,
-      puck_data JSON NOT NULL,
-      updated_at_iso VARCHAR(40) NOT NULL
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-    `CREATE TABLE IF NOT EXISTS future_tasks (
-      id VARCHAR(40) PRIMARY KEY,
-      pass_phase VARCHAR(32) NOT NULL,
-      title VARCHAR(220) NOT NULL,
-      area VARCHAR(48) NOT NULL,
-      priority VARCHAR(8) NOT NULL,
-      status VARCHAR(24) NOT NULL,
-      rationale TEXT NOT NULL,
-      prerequisite TEXT NOT NULL,
-      created_at_iso VARCHAR(40) NOT NULL
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-  ];
-
-  for (const ddl of ddlStatements) {
-    await pool.query(ddl);
-  }
-}
-
-async function getStore(): Promise<ArchiveDataset> {
+function getPreviewStore(): ArchiveDataset {
   if (!globalForArchive.__gvlDiyStore) {
     globalForArchive.__gvlDiyStore = structuredClone(INITIAL_SEED);
   } else {
@@ -1101,93 +999,164 @@ async function getStore(): Promise<ArchiveDataset> {
       globalForArchive.__gvlDiyStore.puckPages = structuredClone(INITIAL_SEED.puckPages);
       globalForArchive.__gvlDiyStore.futureTasks = structuredClone(INITIAL_SEED.futureTasks);
     } else if (Array.isArray(globalForArchive.__gvlDiyStore.futureTasks)) {
-      for (const seedTask of INITIAL_SEED.futureTasks) {
+      const reversedSeed = [...INITIAL_SEED.futureTasks].reverse();
+      for (const seedTask of reversedSeed) {
         const idx = globalForArchive.__gvlDiyStore.futureTasks.findIndex(
           (t) => t.id === seedTask.id
         );
         if (idx === -1) {
-          globalForArchive.__gvlDiyStore.futureTasks.push(structuredClone(seedTask));
+          globalForArchive.__gvlDiyStore.futureTasks.unshift(structuredClone(seedTask));
         } else if (
-          seedTask.id === 'P6-01' &&
-          globalForArchive.__gvlDiyStore.futureTasks[idx].title.includes('FFmpeg')
+          seedTask.id === 'IT-01' ||
+          seedTask.id === 'IT-02' ||
+          seedTask.id === 'IT-03' ||
+          seedTask.id === 'IT-04' ||
+          seedTask.id === 'IT-05'
         ) {
           globalForArchive.__gvlDiyStore.futureTasks[idx] = structuredClone(seedTask);
         }
       }
     }
-  }
-
-  const pool = getMysqlPool();
-  if (pool && !globalForArchive.__gvlMysqlHydrated) {
-    try {
-      await ensureSchemaInitialized(pool);
-      const [rows] = await pool.query<RowDataPacket[]>(
-        'SELECT payload_json FROM archive_kv_snapshot WHERE store_key = ? LIMIT 1',
-        ['primary']
-      );
-      if (rows.length > 0 && rows[0].payload_json) {
-        const parsed = JSON.parse(String(rows[0].payload_json)) as ArchiveDataset;
-        if (!Array.isArray(parsed.sceneChat)) {
-          parsed.sceneChat = structuredClone(INITIAL_SEED.sceneChat);
+    if (Array.isArray(globalForArchive.__gvlDiyStore.timeline)) {
+      globalForArchive.__gvlDiyStore.timeline.forEach((era, i) => {
+        if (typeof era.sortOrder !== 'number') {
+          era.sortOrder = i;
         }
-        if (!Array.isArray(parsed.puckPages)) {
-          parsed.puckPages = structuredClone(INITIAL_SEED.puckPages);
-        }
-        globalForArchive.__gvlDiyStore = parsed;
-      } else {
-        await pool.query(
-          'INSERT INTO archive_kv_snapshot (store_key, payload_json) VALUES (?, ?)',
-          ['primary', JSON.stringify(globalForArchive.__gvlDiyStore)]
-        );
-      }
-
-      // Ensure puck_pages relational table is seeded when empty
-      const [puckCountRows] = await pool.query<RowDataPacket[]>(
-        'SELECT COUNT(*) AS cnt FROM puck_pages'
-      );
-      if (Number(puckCountRows?.[0]?.cnt || 0) === 0) {
-        for (const page of globalForArchive.__gvlDiyStore.puckPages) {
-          await pool.query(
-            `INSERT IGNORE INTO puck_pages (slug, title, is_slot, published, puck_data, updated_at_iso)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-            [
-              page.slug,
-              page.title,
-              page.isSlot ? 1 : 0,
-              page.published ? 1 : 0,
-              JSON.stringify(page.puckData),
-              page.updatedAtIso,
-            ]
-          );
-        }
-      }
-
-      globalForArchive.__gvlMysqlHydrated = true;
-    } catch {
-      // Fallback gracefully to in-memory seed if MySQL socket is temporarily unreachable
+      });
     }
-  }
-
-  if (!globalForArchive.__gvlDiyStore) {
-    globalForArchive.__gvlDiyStore = structuredClone(INITIAL_SEED);
   }
 
   return globalForArchive.__gvlDiyStore;
 }
 
-async function persistMysqlSnapshot(store: ArchiveDataset): Promise<void> {
-  const pool = getMysqlPool();
-  if (!pool) return;
-  try {
-    await pool.query(
-      `INSERT INTO archive_kv_snapshot (store_key, payload_json)
-       VALUES (?, ?)
-       ON DUPLICATE KEY UPDATE payload_json = VALUES(payload_json)`,
-      ['primary', JSON.stringify(store)]
-    );
-  } catch {
-    // Non-fatal in preview
+function normalizeTagsList(raw: unknown, fallback: string[]): string[] {
+  if (!Array.isArray(raw)) return fallback;
+  const cleaned = Array.from(
+    new Set(
+      raw
+        .map((t) =>
+          String(t || '')
+            .trim()
+            .toLowerCase()
+            .replace(/^#+/, '')
+            .replace(/[^a-z0-9_-]+/g, '-')
+            .replace(/(^-|-$)/g, '')
+            .slice(0, 36)
+        )
+        .filter(Boolean)
+    )
+  ).slice(0, 16);
+  return cleaned.length > 0 ? cleaned : fallback;
+}
+
+function normalizeVideoTimestamps(raw: unknown): VideoTimestamp[] {
+  if (!Array.isArray(raw)) {
+    return [{ sec: 0, time: '00:00', label: 'Full Set' }];
   }
+  const normalized = raw
+    .map((item) => {
+      if (!item || typeof item !== 'object') return null;
+      const obj = item as Partial<VideoTimestamp>;
+      const label = String(obj.label || '').trim().slice(0, 140);
+      if (!label) return null;
+
+      let sec = 0;
+      let time = '00:00';
+      const timeStr = String(obj.time || '').trim();
+      const mmSsMatch = timeStr.match(/^(\d{1,3}):(\d{2})$/);
+      if (mmSsMatch) {
+        const mins = Number(mmSsMatch[1]);
+        const secs = Math.min(59, Number(mmSsMatch[2]));
+        sec = mins * 60 + secs;
+        time = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+      } else if (typeof obj.sec === 'number' && Number.isFinite(obj.sec) && obj.sec >= 0) {
+        sec = Math.floor(obj.sec);
+        const mins = Math.floor(sec / 60);
+        const secs = sec % 60;
+        time = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+      }
+      return { sec, time, label };
+    })
+    .filter((v): v is VideoTimestamp => v !== null)
+    .slice(0, 60);
+
+  return normalized.length > 0
+    ? normalized
+    : [{ sec: 0, time: '00:00', label: 'Full Set' }];
+}
+
+function formatFlacSpecLabel(
+  bitDepth: 16 | 24,
+  sampleRateHz: 44100 | 48000 | 96000
+): string {
+  const srKhz =
+    sampleRateHz === 96000
+      ? '96 kHz'
+      : sampleRateHz === 48000
+      ? '48 kHz'
+      : '44.1 kHz';
+  return `${bitDepth}-bit · ${srKhz} FLAC`;
+}
+
+function sanitizeSafeMediaOrWebUrl(raw: string, fallback = ''): string {
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) return fallback;
+  if (/^(javascript|vbscript|file):/i.test(trimmed)) return fallback;
+  if (/^data:/i.test(trimmed)) {
+    return /^data:image\/(svg\+xml|png|jpeg|jpg|webp|gif);/i.test(trimmed)
+      ? trimmed
+      : fallback;
+  }
+  if (/^https?:\/\//i.test(trimmed) || trimmed.startsWith('/')) {
+    return trimmed.slice(0, 2048);
+  }
+  return fallback;
+}
+
+function sanitizeHttpUrlOnly(raw: string | undefined, fallback: string): string {
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) return fallback;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return parsed.toString().slice(0, 1024);
+    }
+  } catch {
+    // Fall back safely
+  }
+  return fallback;
+}
+
+function parseAndValidateIsoDate(raw: string): {
+  isoDate: string;
+  monthKey: string;
+  dayOfMonth: number;
+} {
+  const clean = String(raw || '').trim();
+  const match = clean.match(/^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/);
+  if (!match) {
+    throw new Error('Valid YYYY-MM-DD calendar date is required');
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const utcCheck = new Date(Date.UTC(year, month - 1, day));
+  if (
+    utcCheck.getUTCFullYear() !== year ||
+    utcCheck.getUTCMonth() + 1 !== month ||
+    utcCheck.getUTCDate() !== day
+  ) {
+    throw new Error('Invalid calendar day for selected month');
+  }
+  const isoDate = `${String(year).padStart(4, '0')}-${String(month).padStart(
+    2,
+    '0'
+  )}-${String(day).padStart(2, '0')}`;
+  return {
+    isoDate,
+    monthKey: isoDate.slice(0, 7),
+    dayOfMonth: Number(isoDate.slice(8, 10)),
+  };
 }
 
 export type PublicArchivePayload = Omit<ArchiveDataset, 'subscribers' | 'futureTasks'>;
@@ -1198,35 +1167,191 @@ export const archiveRepository = {
   },
 
   async getPublicPayload(): Promise<PublicArchivePayload> {
-    const store = await getStore();
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      return fetchPublicPayloadSql(pool, INITIAL_SEED.siteSettings);
+    }
+    const store = getPreviewStore();
     const { subscribers: _omitSub, futureTasks: _omitTasks, ...publicRest } = store;
-    return structuredClone(publicRest);
+    return {
+      ...structuredClone(publicRest),
+      sceneChat: structuredClone(store.sceneChat.slice(-PREVIEW_SCENE_CHAT_DISPLAY)),
+    };
   },
 
   async getAdminFullPayload(): Promise<
     ArchiveDataset & {
       storageDriver: 'hostinger-mysql' | 'preview-memory';
       runtimePosture: RuntimePostureSnapshot;
+      auditLogs: AuditLogEntry[];
     }
   > {
-    const store = await getStore();
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      const [dataset, auditLogs] = await Promise.all([
+        fetchAdminDatasetSql(pool, INITIAL_SEED.siteSettings),
+        listAuditLogsSql(pool, 40),
+      ]);
+      return {
+        ...dataset,
+        storageDriver: 'hostinger-mysql',
+        runtimePosture: getRuntimePostureSnapshot(),
+        auditLogs,
+      };
+    }
+
+    const store = getPreviewStore();
+    const auditLogs = await this.listAuditLogs(40);
     return {
       ...structuredClone(store),
-      storageDriver: isMysqlConfigured() ? 'hostinger-mysql' : 'preview-memory',
+      sceneChat: structuredClone(store.sceneChat.slice(-PREVIEW_SCENE_CHAT_DISPLAY)),
+      storageDriver: 'preview-memory',
       runtimePosture: getRuntimePostureSnapshot(),
+      auditLogs,
     };
+  },
+
+  async recordAuditLog(
+    actionName: string,
+    targetId?: string | null,
+    curatorUsername = 'curator'
+  ): Promise<AuditLogEntry> {
+    const cleanAction = String(actionName || 'ADMIN_ACTION').trim().slice(0, 96);
+    const cleanTarget = targetId ? String(targetId).trim().slice(0, 128) : null;
+    const cleanActor = String(curatorUsername || 'curator').trim().slice(0, 80);
+    const nowIso = new Date().toISOString();
+
+    const entry: AuditLogEntry = {
+      id: `aud-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      curatorUsername: cleanActor,
+      actionName: cleanAction,
+      targetId: cleanTarget,
+      createdAtIso: nowIso,
+    };
+
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      await insertAuditLogSql(pool, {
+        createdAtIso: nowIso,
+        curatorUsername: cleanActor,
+        actionName: cleanAction,
+        targetId: cleanTarget,
+      });
+      return structuredClone(entry);
+    }
+
+    // Preview mode retains full audit log history in memory as well
+    const previewLogs = getPreviewAuditLogs();
+    previewLogs.unshift(entry);
+    return structuredClone(entry);
+  },
+
+  async listAuditLogs(limit = 40): Promise<AuditLogEntry[]> {
+    const safeLimit = Math.max(1, Math.min(200, Math.floor(limit)));
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      return listAuditLogsSql(pool, safeLimit);
+    }
+    return structuredClone(getPreviewAuditLogs().slice(0, safeLimit));
+  },
+
+  async isPublishedDriveFileId(cleanFileId: string): Promise<boolean> {
+    if (!cleanFileId || !/^[a-zA-Z0-9_-]{10,80}$/.test(cleanFileId)) {
+      return false;
+    }
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      return isPublishedDriveFileIdSql(pool, cleanFileId);
+    }
+
+    const store = getPreviewStore();
+    const proxyNeedle = `/api/media/drive/${cleanFileId}`;
+
+    const matchesRef = (val?: string | null) =>
+      Boolean(
+        val &&
+          (val === cleanFileId ||
+            val.includes(proxyNeedle) ||
+            val.includes(`/d/${cleanFileId}`) ||
+            val.includes(`id=${cleanFileId}`))
+      );
+
+    if (store.videos.some((v) => matchesRef(v.posterUrl))) {
+      return true;
+    }
+
+    if (
+      store.audio.some(
+        (a) =>
+          (a.sourceType === 'gdrive' && matchesRef(a.sourceIdOrUrl)) ||
+          matchesRef(a.flacStreamUrl) ||
+          matchesRef(a.artworkUrl) ||
+          (Array.isArray(a.altVersions) &&
+            a.altVersions.some((alt) => matchesRef(alt.streamUrl)))
+      )
+    ) {
+      return true;
+    }
+
+    if (
+      store.photos.some(
+        (p) =>
+          (p.sourceType === 'gdrive' && matchesRef(p.sourceIdOrUrl)) ||
+          matchesRef(p.imageUrl)
+      )
+    ) {
+      return true;
+    }
+
+    if (
+      store.auctions.some(
+        (a) =>
+          (a.sourceType === 'gdrive' && matchesRef(a.sourceIdOrUrl)) ||
+          matchesRef(a.imageUrl)
+      )
+    ) {
+      return true;
+    }
+
+    if (store.timeline.some((t) => matchesRef(t.portholeImageUrl))) {
+      return true;
+    }
+
+    if (store.remembered.some((r) => matchesRef(r.imageUrl))) {
+      return true;
+    }
+
+    if (
+      store.puckPages.some(
+        (p) => p.published && JSON.stringify(p.puckData).includes(cleanFileId)
+      )
+    ) {
+      return true;
+    }
+
+    return false;
   },
 
   async updateSiteSettings(
     partial: Partial<Omit<AdminSiteSettings, 'updatedAtIso'>>
   ): Promise<AdminSiteSettings> {
-    const store = await getStore();
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      const current = await getSiteSettingsSql(pool, INITIAL_SEED.siteSettings);
+      const nextSettings: AdminSiteSettings = {
+        ...current,
+        ...partial,
+        updatedAtIso: new Date().toISOString(),
+      };
+      return upsertSiteSettingsSql(pool, nextSettings);
+    }
+
+    const store = getPreviewStore();
     store.siteSettings = {
       ...store.siteSettings,
       ...partial,
       updatedAtIso: new Date().toISOString(),
     };
-    await persistMysqlSnapshot(store);
     return structuredClone(store.siteSettings);
   },
 
@@ -1242,42 +1367,121 @@ export const archiveRepository = {
     timestamps: VideoTimestamp[];
     tags: string[];
   }): Promise<VideoTape> {
-    const store = await getStore();
+    const cleanTitle = input.title.trim().slice(0, 180);
+    if (!cleanTitle) throw new Error('Video title is required');
     const ytId = extractYoutubeVideoId(input.youtubeIdOrUrl);
     const resolvedPoster = resolveMediaUrl(
       input.posterSourceType || 'embedded',
       input.posterSourceIdOrUrl,
       IMG_POE_MILL
     );
+    const cleanTimestamps = normalizeVideoTimestamps(input.timestamps);
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    const count = pool
+      ? await countTableRowsSql(pool, 'videos')
+      : getPreviewStore().videos.length;
+
     const created: VideoTape = {
-      id: `VID-0${store.videos.length + 1}-${Date.now().toString().slice(-3)}`,
-      slug: input.title
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/(^-|-$)/g, ''),
-      title: input.title.trim().slice(0, 180),
+      id: `VID-0${count + 1}-${Date.now().toString().slice(-3)}`,
+      slug:
+        cleanTitle
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/(^-|-$)/g, '') || `tape-${Date.now()}`,
+      title: cleanTitle,
       recordedDate: input.recordedDate.trim() || new Date().toISOString().slice(0, 10),
-      venue: input.venue.trim().slice(0, 120),
+      venue: input.venue.trim().slice(0, 120) || 'Greenville DIY',
       filmer: input.filmer.trim().slice(0, 80) || 'Archive Crew',
       youtubeUnlistedId: ytId,
       posterUrl: resolvedPoster,
-      timestamps:
-        input.timestamps.length > 0
-          ? input.timestamps
-          : [{ sec: 0, time: '00:00', label: 'Full Set' }],
-      tags: input.tags.length > 0 ? input.tags : ['greenville', 'diy'],
+      timestamps: cleanTimestamps,
+      tags: normalizeTagsList(input.tags, ['greenville', 'diy']),
     };
+
+    if (pool) {
+      await insertVideoSql(pool, created);
+      return structuredClone(created);
+    }
+
+    const store = getPreviewStore();
     store.videos.unshift(created);
-    await persistMysqlSnapshot(store);
     return structuredClone(created);
   },
 
+  async updateVideoTape(
+    id: string,
+    input: {
+      title?: string;
+      venue?: string;
+      filmer?: string;
+      recordedDate?: string;
+      youtubeIdOrUrl?: string;
+      posterSourceType?: MediaSourceType;
+      posterSourceIdOrUrl?: string;
+      posterUrl?: string;
+      timestamps?: VideoTimestamp[];
+      tags?: string[];
+    }
+  ): Promise<VideoTape | null> {
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    const target = pool
+      ? await getVideoByIdSql(pool, id)
+      : getPreviewStore().videos.find((v) => v.id === id) || null;
+    if (!target) return null;
+
+    if (typeof input.title === 'string' && input.title.trim()) {
+      target.title = input.title.trim().slice(0, 180);
+      target.slug =
+        target.title
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/(^-|-$)/g, '') || target.slug;
+    }
+    if (typeof input.venue === 'string' && input.venue.trim()) {
+      target.venue = input.venue.trim().slice(0, 120);
+    }
+    if (typeof input.filmer === 'string' && input.filmer.trim()) {
+      target.filmer = input.filmer.trim().slice(0, 80);
+    }
+    if (typeof input.recordedDate === 'string' && input.recordedDate.trim()) {
+      target.recordedDate = input.recordedDate.trim().slice(0, 20);
+    }
+    if (typeof input.youtubeIdOrUrl === 'string' && input.youtubeIdOrUrl.trim()) {
+      target.youtubeUnlistedId = extractYoutubeVideoId(input.youtubeIdOrUrl);
+    }
+
+    if (typeof input.posterSourceIdOrUrl === 'string' && input.posterSourceIdOrUrl.trim()) {
+      target.posterUrl = resolveMediaUrl(
+        input.posterSourceType || 'embedded',
+        input.posterSourceIdOrUrl,
+        target.posterUrl
+      );
+    } else if (typeof input.posterUrl === 'string' && input.posterUrl.trim()) {
+      target.posterUrl = sanitizeSafeMediaOrWebUrl(input.posterUrl, target.posterUrl);
+    }
+
+    if (Array.isArray(input.timestamps)) {
+      target.timestamps = normalizeVideoTimestamps(input.timestamps);
+    }
+    if (Array.isArray(input.tags)) {
+      target.tags = normalizeTagsList(input.tags, ['greenville', 'diy']);
+    }
+
+    if (pool) {
+      await updateVideoSql(pool, target);
+    }
+    return structuredClone(target);
+  },
+
   async deleteVideoTape(id: string): Promise<boolean> {
-    const store = await getStore();
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      return deleteVideoSql(pool, id);
+    }
+    const store = getPreviewStore();
     const idx = store.videos.findIndex((v) => v.id === id);
     if (idx === -1) return false;
     store.videos.splice(idx, 1);
-    await persistMysqlSnapshot(store);
     return true;
   },
 
@@ -1292,6 +1496,9 @@ export const archiveRepository = {
     sampleRateHz: 44100 | 48000 | 96000;
     sourceType: MediaSourceType;
     sourceIdOrUrl: string;
+    artworkUrl?: string;
+    artworkSourceType?: MediaSourceType;
+    artworkSourceIdOrUrl?: string;
     primaryTakeLabel?: string;
     altTakes?: Array<{
       label: string;
@@ -1305,16 +1512,20 @@ export const archiveRepository = {
     waveformPeaks?: number[];
     tags: string[];
   }): Promise<FlacRecording> {
-    const store = await getStore();
-    const formatSpec = (bd: 16 | 24, sr: 44100 | 48000 | 96000) => {
-      const srKhz =
-        sr === 96000 ? '96 kHz' : sr === 48000 ? '48 kHz' : '44.1 kHz';
-      return `${bd}-bit · ${srKhz} FLAC`;
-    };
+    const cleanTitle = input.title.trim().slice(0, 180);
+    const cleanArtist = input.artist.trim().slice(0, 120);
+    if (!cleanTitle || !cleanArtist) {
+      throw new Error('Track title and artist are required');
+    }
 
     const bitDepth: 16 | 24 = input.bitDepth === 16 ? 16 : 24;
-    const sampleRateHz: 44100 | 48000 | 96000 = input.sampleRateHz || 48000;
-    const specLabel = formatSpec(bitDepth, sampleRateHz);
+    const sampleRateHz: 44100 | 48000 | 96000 =
+      input.sampleRateHz === 96000
+        ? 96000
+        : input.sampleRateHz === 44100
+        ? 44100
+        : 48000;
+    const specLabel = formatFlacSpecLabel(bitDepth, sampleRateHz);
     const streamUrl =
       input.sourceType === 'gdrive' || input.sourceType === 'r2'
         ? resolveMediaUrl(input.sourceType, input.sourceIdOrUrl, '')
@@ -1342,7 +1553,7 @@ export const archiveRepository = {
           return {
             id: `v-alt-${idx + 1}-${Date.now()}`,
             label: take.label.trim().slice(0, 40),
-            specLabel: formatSpec(takeBd, takeSr),
+            specLabel: formatFlacSpecLabel(takeBd, takeSr),
             streamUrl: takeUrl,
             variantKind: 'alt' as const,
           };
@@ -1355,47 +1566,216 @@ export const archiveRepository = {
         ? Math.round(Math.max(-40, Math.min(0, input.loudnessLufs)) * 10) / 10
         : -14.0;
 
+    const resolvedArtwork = input.artworkSourceIdOrUrl?.trim()
+      ? resolveMediaUrl(
+          input.artworkSourceType || 'embedded',
+          input.artworkSourceIdOrUrl,
+          IMG_THE_BARN
+        )
+      : input.artworkUrl?.trim()
+      ? sanitizeSafeMediaOrWebUrl(input.artworkUrl, IMG_THE_BARN)
+      : IMG_THE_BARN;
+
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    const count = pool
+      ? await countTableRowsSql(pool, 'flac_tracks')
+      : getPreviewStore().audio.length;
+
     const created: FlacRecording = {
-      id: `AUD-0${store.audio.length + 1}-${Date.now().toString().slice(-3)}`,
-      slug: input.title
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/(^-|-$)/g, ''),
-      title: input.title.trim().slice(0, 180),
-      artist: input.artist.trim().slice(0, 120),
-      venue: input.venue.trim().slice(0, 120),
+      id: `AUD-0${count + 1}-${Date.now().toString().slice(-3)}`,
+      slug:
+        cleanTitle
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/(^-|-$)/g, '') || `flac-${Date.now()}`,
+      title: cleanTitle,
+      artist: cleanArtist,
+      venue: input.venue.trim().slice(0, 120) || 'The Barn',
       recordedDate:
         (input.recordedDate || '').trim() || new Date().toISOString().slice(0, 10),
-      durationSec: Math.max(5, Number(input.durationSec) || 180),
+      durationSec: Math.max(5, Math.min(14400, Number(input.durationSec) || 180)),
       bitDepth,
       sampleRateHz,
       specLabel,
       sourceType: input.sourceType,
       sourceIdOrUrl: input.sourceIdOrUrl.trim(),
       flacStreamUrl: streamUrl,
-      artworkUrl: IMG_THE_BARN,
+      artworkUrl: resolvedArtwork,
       samplyPlayerId:
         input.sourceType === 'samply' ? input.sourceIdOrUrl.trim() : undefined,
-      previewRootHz: Number(input.previewRootHz) || 196.0,
+      previewRootHz: Math.max(60, Math.min(1200, Number(input.previewRootHz) || 196.0)),
       loudnessLufs: resolvedLufs,
       altVersions,
       waveformPeaks:
-        Array.isArray(input.waveformPeaks) && input.waveformPeaks.length >= 42
-          ? input.waveformPeaks
-          : buildDeterministicPeaks(input.title, 72),
-      tags: input.tags.length > 0 ? input.tags : ['greenville', 'flac'],
+        Array.isArray(input.waveformPeaks) && input.waveformPeaks.length >= 24
+          ? input.waveformPeaks.map((n) => Math.max(6, Math.min(64, Math.round(Number(n) || 18))))
+          : buildDeterministicPeaks(cleanTitle, 72),
+      tags: normalizeTagsList(input.tags, ['greenville', 'flac']),
     };
+
+    if (pool) {
+      await insertFlacSql(pool, created);
+      return structuredClone(created);
+    }
+
+    const store = getPreviewStore();
     store.audio.unshift(created);
-    await persistMysqlSnapshot(store);
     return structuredClone(created);
   },
 
+  async updateFlacRecording(
+    id: string,
+    input: {
+      title?: string;
+      artist?: string;
+      venue?: string;
+      recordedDate?: string;
+      durationSec?: number;
+      bitDepth?: 16 | 24;
+      sampleRateHz?: 44100 | 48000 | 96000;
+      sourceType?: MediaSourceType;
+      sourceIdOrUrl?: string;
+      loudnessLufs?: number;
+      artworkUrl?: string;
+      artworkSourceType?: MediaSourceType;
+      artworkSourceIdOrUrl?: string;
+      previewRootHz?: number;
+      altVersions?: FlacVersionSource[];
+      waveformPeaks?: number[];
+      tags?: string[];
+    }
+  ): Promise<FlacRecording | null> {
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    const target = pool
+      ? await getFlacByIdSql(pool, id)
+      : getPreviewStore().audio.find((a) => a.id === id) || null;
+    if (!target) return null;
+
+    if (typeof input.title === 'string' && input.title.trim()) {
+      target.title = input.title.trim().slice(0, 180);
+      target.slug =
+        target.title
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/(^-|-$)/g, '') || target.slug;
+    }
+    if (typeof input.artist === 'string' && input.artist.trim()) {
+      target.artist = input.artist.trim().slice(0, 120);
+    }
+    if (typeof input.venue === 'string' && input.venue.trim()) {
+      target.venue = input.venue.trim().slice(0, 120);
+    }
+    if (typeof input.recordedDate === 'string' && input.recordedDate.trim()) {
+      target.recordedDate = input.recordedDate.trim().slice(0, 20);
+    }
+    if (typeof input.durationSec === 'number' && Number.isFinite(input.durationSec)) {
+      target.durationSec = Math.max(5, Math.min(14400, Math.round(input.durationSec)));
+    }
+    if (input.bitDepth === 16 || input.bitDepth === 24) {
+      target.bitDepth = input.bitDepth;
+    }
+    if (
+      input.sampleRateHz === 44100 ||
+      input.sampleRateHz === 48000 ||
+      input.sampleRateHz === 96000
+    ) {
+      target.sampleRateHz = input.sampleRateHz;
+    }
+    target.specLabel = formatFlacSpecLabel(target.bitDepth, target.sampleRateHz);
+
+    if (
+      input.sourceType &&
+      ['samply', 'gdrive', 'r2', 'embedded'].includes(input.sourceType)
+    ) {
+      target.sourceType = input.sourceType;
+    }
+    if (typeof input.sourceIdOrUrl === 'string') {
+      target.sourceIdOrUrl = input.sourceIdOrUrl.trim();
+    }
+    target.flacStreamUrl =
+      target.sourceType === 'gdrive' || target.sourceType === 'r2'
+        ? resolveMediaUrl(target.sourceType, target.sourceIdOrUrl, '')
+        : '';
+    target.samplyPlayerId =
+      target.sourceType === 'samply' ? target.sourceIdOrUrl : undefined;
+
+    if (typeof input.loudnessLufs === 'number' && Number.isFinite(input.loudnessLufs)) {
+      target.loudnessLufs =
+        Math.round(Math.max(-40, Math.min(0, input.loudnessLufs)) * 10) / 10;
+    }
+    if (typeof input.previewRootHz === 'number' && Number.isFinite(input.previewRootHz)) {
+      target.previewRootHz = Math.max(60, Math.min(1200, input.previewRootHz));
+    }
+
+    if (
+      typeof input.artworkSourceIdOrUrl === 'string' &&
+      input.artworkSourceIdOrUrl.trim()
+    ) {
+      target.artworkUrl = resolveMediaUrl(
+        input.artworkSourceType || 'embedded',
+        input.artworkSourceIdOrUrl,
+        target.artworkUrl || IMG_THE_BARN
+      );
+    } else if (typeof input.artworkUrl === 'string' && input.artworkUrl.trim()) {
+      target.artworkUrl = sanitizeSafeMediaOrWebUrl(
+        input.artworkUrl,
+        target.artworkUrl || IMG_THE_BARN
+      );
+    }
+
+    if (Array.isArray(input.altVersions)) {
+      const cleaned = input.altVersions
+        .map((v, idx): FlacVersionSource | null => {
+          const label = String(v?.label || '').trim().slice(0, 48);
+          if (!label) return null;
+          const rawStream = String(v?.streamUrl || '').trim();
+          const resolvedStream = rawStream
+            ? rawStream.includes('drive.google.com/') ||
+              /^[a-zA-Z0-9_-]{15,}$/.test(rawStream)
+              ? resolveMediaUrl('gdrive', rawStream, '')
+              : sanitizeSafeMediaOrWebUrl(rawStream, '')
+            : idx === 0
+            ? target.flacStreamUrl
+            : '';
+          return {
+            id: String(v?.id || `v-edit-${idx}-${Date.now()}`).slice(0, 48),
+            label,
+            specLabel: v?.specLabel
+              ? String(v.specLabel).trim().slice(0, 64)
+              : target.specLabel,
+            streamUrl: resolvedStream,
+            variantKind:
+              idx === 0 || v?.variantKind === 'primary' ? 'primary' : 'alt',
+          };
+        })
+        .filter((v): v is FlacVersionSource => v !== null);
+      target.altVersions = cleaned.length > 0 ? cleaned : undefined;
+    }
+
+    if (Array.isArray(input.waveformPeaks) && input.waveformPeaks.length >= 24) {
+      target.waveformPeaks = input.waveformPeaks.map((n) =>
+        Math.max(6, Math.min(64, Math.round(Number(n) || 18)))
+      );
+    }
+    if (Array.isArray(input.tags)) {
+      target.tags = normalizeTagsList(input.tags, ['greenville', 'flac']);
+    }
+
+    if (pool) {
+      await updateFlacSql(pool, target);
+    }
+    return structuredClone(target);
+  },
+
   async deleteFlacRecording(id: string): Promise<boolean> {
-    const store = await getStore();
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      return deleteFlacSql(pool, id);
+    }
+    const store = getPreviewStore();
     const idx = store.audio.findIndex((a) => a.id === id);
     if (idx === -1) return false;
     store.audio.splice(idx, 1);
-    await persistMysqlSnapshot(store);
     return true;
   },
 
@@ -1410,35 +1790,114 @@ export const archiveRepository = {
     dimensionsLabel?: string;
     tags: string[];
   }): Promise<PhotoPlate> {
-    const store = await getStore();
+    const cleanTitle = input.title.trim().slice(0, 180);
+    if (!cleanTitle) throw new Error('Photo title is required');
     const resolvedImg = resolveMediaUrl(
       input.sourceType,
       input.sourceIdOrUrl,
       IMG_THE_BARN
     );
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    const count = pool
+      ? await countTableRowsSql(pool, 'photos')
+      : getPreviewStore().photos.length;
+
     const created: PhotoPlate = {
-      id: `PHO-0${store.photos.length + 1}-${Date.now().toString().slice(-3)}`,
-      title: input.title.trim().slice(0, 180),
-      photographer: input.photographer.trim().slice(0, 100),
-      venue: input.venue.trim().slice(0, 120),
+      id: `PHO-0${count + 1}-${Date.now().toString().slice(-3)}`,
+      title: cleanTitle,
+      photographer: input.photographer.trim().slice(0, 100) || 'Archive Crew',
+      venue: input.venue.trim().slice(0, 120) || 'Greenville DIY',
       year: input.year.trim().slice(0, 12) || '2026',
       sourceType: input.sourceType,
       sourceIdOrUrl: input.sourceIdOrUrl.trim(),
-      dimensionsLabel: input.dimensionsLabel,
+      dimensionsLabel: input.dimensionsLabel?.trim().slice(0, 80),
       imageUrl: resolvedImg,
-      tags: input.tags.length > 0 ? input.tags : ['35mm', 'greenville'],
+      tags: normalizeTagsList(input.tags, ['35mm', 'greenville']),
     };
+
+    if (pool) {
+      await insertPhotoSql(pool, created);
+      return structuredClone(created);
+    }
+
+    const store = getPreviewStore();
     store.photos.unshift(created);
-    await persistMysqlSnapshot(store);
     return structuredClone(created);
   },
 
+  async updatePhotoPlate(
+    id: string,
+    input: {
+      title?: string;
+      photographer?: string;
+      venue?: string;
+      year?: string;
+      sourceType?: MediaSourceType;
+      sourceIdOrUrl?: string;
+      dimensionsLabel?: string;
+      imageUrl?: string;
+      tags?: string[];
+    }
+  ): Promise<PhotoPlate | null> {
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    const target = pool
+      ? await getPhotoByIdSql(pool, id)
+      : getPreviewStore().photos.find((p) => p.id === id) || null;
+    if (!target) return null;
+
+    if (typeof input.title === 'string' && input.title.trim()) {
+      target.title = input.title.trim().slice(0, 180);
+    }
+    if (typeof input.photographer === 'string' && input.photographer.trim()) {
+      target.photographer = input.photographer.trim().slice(0, 100);
+    }
+    if (typeof input.venue === 'string' && input.venue.trim()) {
+      target.venue = input.venue.trim().slice(0, 120);
+    }
+    if (typeof input.year === 'string' && input.year.trim()) {
+      target.year = input.year.trim().slice(0, 12);
+    }
+    if (
+      input.sourceType &&
+      ['gdrive', 'r2', 'embedded'].includes(input.sourceType)
+    ) {
+      target.sourceType = input.sourceType;
+    }
+    if (typeof input.sourceIdOrUrl === 'string') {
+      target.sourceIdOrUrl = input.sourceIdOrUrl.trim();
+      if (target.sourceIdOrUrl) {
+        target.imageUrl = resolveMediaUrl(
+          target.sourceType || 'embedded',
+          target.sourceIdOrUrl,
+          target.imageUrl
+        );
+      }
+    }
+    if (typeof input.imageUrl === 'string' && input.imageUrl.trim()) {
+      target.imageUrl = sanitizeSafeMediaOrWebUrl(input.imageUrl, target.imageUrl);
+    }
+    if (typeof input.dimensionsLabel === 'string') {
+      target.dimensionsLabel = input.dimensionsLabel.trim().slice(0, 80) || undefined;
+    }
+    if (Array.isArray(input.tags)) {
+      target.tags = normalizeTagsList(input.tags, ['35mm', 'greenville']);
+    }
+
+    if (pool) {
+      await updatePhotoSql(pool, target);
+    }
+    return structuredClone(target);
+  },
+
   async deletePhotoPlate(id: string): Promise<boolean> {
-    const store = await getStore();
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      return deletePhotoSql(pool, id);
+    }
+    const store = getPreviewStore();
     const idx = store.photos.findIndex((p) => p.id === id);
     if (idx === -1) return false;
     store.photos.splice(idx, 1);
-    await persistMysqlSnapshot(store);
     return true;
   },
 
@@ -1451,47 +1910,391 @@ export const archiveRepository = {
     active: boolean;
     tags: string[];
   }): Promise<SceneArtist> {
-    const store = await getStore();
+    const cleanName = input.name.trim().slice(0, 140);
+    if (!cleanName) throw new Error('Artist name is required');
     const statusTag = input.active ? 'active' : 'inactive';
-    const cleanTags = Array.from(
-      new Set([
-        ...input.tags.filter((t) => t !== 'active' && t !== 'inactive'),
-        statusTag,
-      ])
+    const baseTags = normalizeTagsList(
+      input.tags.filter((t) => t !== 'active' && t !== 'inactive'),
+      ['greenville']
     );
+    const cleanTags = Array.from(new Set([...baseTags, statusTag]));
+
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    const count = pool
+      ? await countTableRowsSql(pool, 'artists')
+      : getPreviewStore().artists.length;
+
     const created: SceneArtist = {
-      id: `ART-0${store.artists.length + 1}-${Date.now().toString().slice(-3)}`,
-      name: input.name.trim().slice(0, 140),
+      id: `ART-0${count + 1}-${Date.now().toString().slice(-3)}`,
+      name: cleanName,
       role: input.role,
-      genre: input.genre.trim().slice(0, 120),
+      genre: input.genre.trim().slice(0, 120) || 'DIY Scene',
       area: input.area.trim().slice(0, 100) || 'Greenville, SC',
       active: input.active,
       tags: cleanTags,
     };
+
+    if (pool) {
+      await insertArtistSql(pool, created);
+      return structuredClone(created);
+    }
+
+    const store = getPreviewStore();
     store.artists.unshift(created);
-    await persistMysqlSnapshot(store);
     return structuredClone(created);
   },
 
-  async toggleSceneArtistActive(id: string): Promise<SceneArtist | null> {
-    const store = await getStore();
-    const target = store.artists.find((a) => a.id === id);
+  async updateSceneArtist(
+    id: string,
+    input: {
+      name?: string;
+      role?: SceneArtist['role'];
+      genre?: string;
+      area?: string;
+      active?: boolean;
+      tags?: string[];
+    }
+  ): Promise<SceneArtist | null> {
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    const target = pool
+      ? await getArtistByIdSql(pool, id)
+      : getPreviewStore().artists.find((a) => a.id === id) || null;
     if (!target) return null;
+
+    if (typeof input.name === 'string' && input.name.trim()) {
+      target.name = input.name.trim().slice(0, 140);
+    }
+    if (
+      input.role &&
+      ['Band', 'Musician', 'Photographer', 'Videographer', 'Collective'].includes(
+        input.role
+      )
+    ) {
+      target.role = input.role;
+    }
+    if (typeof input.genre === 'string' && input.genre.trim()) {
+      target.genre = input.genre.trim().slice(0, 120);
+    }
+    if (typeof input.area === 'string' && input.area.trim()) {
+      target.area = input.area.trim().slice(0, 100);
+    }
+    if (typeof input.active === 'boolean') {
+      target.active = input.active;
+    }
+
+    const rawTags = Array.isArray(input.tags) ? input.tags : target.tags;
+    const baseTags = normalizeTagsList(
+      rawTags.filter((t) => t !== 'active' && t !== 'inactive'),
+      ['greenville']
+    );
+    target.tags = Array.from(
+      new Set([...baseTags, target.active ? 'active' : 'inactive'])
+    );
+
+    if (pool) {
+      await updateArtistSql(pool, target);
+    }
+    return structuredClone(target);
+  },
+
+  async toggleSceneArtistActive(id: string): Promise<SceneArtist | null> {
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    const target = pool
+      ? await getArtistByIdSql(pool, id)
+      : getPreviewStore().artists.find((a) => a.id === id) || null;
+    if (!target) return null;
+
     target.active = !target.active;
     target.tags = [
       ...target.tags.filter((t) => t !== 'active' && t !== 'inactive'),
       target.active ? 'active' : 'inactive',
     ];
-    await persistMysqlSnapshot(store);
+
+    if (pool) {
+      await updateArtistSql(pool, target);
+    }
     return structuredClone(target);
   },
 
   async deleteSceneArtist(id: string): Promise<boolean> {
-    const store = await getStore();
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      return deleteArtistSql(pool, id);
+    }
+    const store = getPreviewStore();
     const idx = store.artists.findIndex((a) => a.id === id);
     if (idx === -1) return false;
     store.artists.splice(idx, 1);
-    await persistMysqlSnapshot(store);
+    return true;
+  },
+
+  // ==================== TIMELINE ERAS CRUD & REORDER ====================
+  async addTimelineEra(input: {
+    eraRange: string;
+    dialShortLabel: string;
+    title: string;
+    summary: string;
+    sourceType?: MediaSourceType;
+    sourceIdOrUrl?: string;
+    portholeImageUrl?: string;
+  }): Promise<TimelineEra> {
+    const cleanTitle = input.title.trim().slice(0, 160);
+    const cleanEraRange = input.eraRange.trim().slice(0, 40);
+    if (!cleanTitle || !cleanEraRange) {
+      throw new Error('Era range and title are required');
+    }
+    const resolvedImg = input.sourceIdOrUrl?.trim()
+      ? resolveMediaUrl(
+          input.sourceType || 'embedded',
+          input.sourceIdOrUrl,
+          IMG_POE_MILL
+        )
+      : input.portholeImageUrl?.trim()
+      ? sanitizeSafeMediaOrWebUrl(input.portholeImageUrl, IMG_POE_MILL)
+      : IMG_POE_MILL;
+
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    const count = pool
+      ? await countTableRowsSql(pool, 'timeline_eras')
+      : getPreviewStore().timeline.length;
+
+    const created: TimelineEra = {
+      id: `ERA-0${count + 1}-${Date.now().toString().slice(-3)}`,
+      eraRange: cleanEraRange,
+      dialShortLabel:
+        input.dialShortLabel.trim().slice(0, 12).toUpperCase() ||
+        cleanEraRange.slice(0, 6).toUpperCase(),
+      title: cleanTitle,
+      summary: input.summary.trim().slice(0, 600),
+      portholeImageUrl: resolvedImg,
+      sortOrder: count,
+    };
+
+    if (pool) {
+      await insertTimelineEraSql(pool, created);
+      return structuredClone(created);
+    }
+
+    const store = getPreviewStore();
+    store.timeline.push(created);
+    store.timeline.forEach((e, idx) => {
+      e.sortOrder = idx;
+    });
+    return structuredClone(created);
+  },
+
+  async updateTimelineEra(
+    id: string,
+    input: {
+      eraRange?: string;
+      dialShortLabel?: string;
+      title?: string;
+      summary?: string;
+      sourceType?: MediaSourceType;
+      sourceIdOrUrl?: string;
+      portholeImageUrl?: string;
+    }
+  ): Promise<TimelineEra | null> {
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    const target = pool
+      ? await getTimelineEraByIdSql(pool, id)
+      : getPreviewStore().timeline.find((e) => e.id === id) || null;
+    if (!target) return null;
+
+    if (typeof input.eraRange === 'string' && input.eraRange.trim()) {
+      target.eraRange = input.eraRange.trim().slice(0, 40);
+    }
+    if (typeof input.dialShortLabel === 'string' && input.dialShortLabel.trim()) {
+      target.dialShortLabel = input.dialShortLabel.trim().slice(0, 12).toUpperCase();
+    }
+    if (typeof input.title === 'string' && input.title.trim()) {
+      target.title = input.title.trim().slice(0, 160);
+    }
+    if (typeof input.summary === 'string' && input.summary.trim()) {
+      target.summary = input.summary.trim().slice(0, 600);
+    }
+    if (typeof input.sourceIdOrUrl === 'string' && input.sourceIdOrUrl.trim()) {
+      target.portholeImageUrl = resolveMediaUrl(
+        input.sourceType || 'embedded',
+        input.sourceIdOrUrl,
+        target.portholeImageUrl
+      );
+    } else if (
+      typeof input.portholeImageUrl === 'string' &&
+      input.portholeImageUrl.trim()
+    ) {
+      target.portholeImageUrl = sanitizeSafeMediaOrWebUrl(
+        input.portholeImageUrl,
+        target.portholeImageUrl
+      );
+    }
+
+    if (pool) {
+      await updateTimelineEraSql(pool, target);
+    }
+    return structuredClone(target);
+  },
+
+  async reorderTimelineEras(orderedIds: string[]): Promise<TimelineEra[]> {
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      return reorderTimelineErasSql(pool, orderedIds);
+    }
+
+    const store = getPreviewStore();
+    const byId = new Map(store.timeline.map((e) => [e.id, e]));
+    const nextOrdered: TimelineEra[] = [];
+
+    for (const rawId of orderedIds) {
+      const id = String(rawId || '').trim();
+      const found = byId.get(id);
+      if (found) {
+        nextOrdered.push(found);
+        byId.delete(id);
+      }
+    }
+    for (const remaining of byId.values()) {
+      nextOrdered.push(remaining);
+    }
+    nextOrdered.forEach((e, idx) => {
+      e.sortOrder = idx;
+    });
+    store.timeline = nextOrdered;
+    return structuredClone(store.timeline);
+  },
+
+  async deleteTimelineEra(id: string): Promise<boolean> {
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      return deleteTimelineEraSql(pool, id);
+    }
+    const store = getPreviewStore();
+    const idx = store.timeline.findIndex((e) => e.id === id);
+    if (idx === -1) return false;
+    store.timeline.splice(idx, 1);
+    store.timeline.forEach((e, i) => {
+      e.sortOrder = i;
+    });
+    return true;
+  },
+
+  // ==================== PLACES TO REMEMBER CRUD ====================
+  async addRememberedPlace(input: {
+    name: string;
+    closedSortIso: string;
+    closedDisplayLabel: string;
+    location: string;
+    sourceType?: MediaSourceType;
+    sourceIdOrUrl?: string;
+    imageUrl?: string;
+    memorialStory: string;
+    tags: string[];
+  }): Promise<RememberedPlace> {
+    const cleanName = input.name.trim().slice(0, 160);
+    if (!cleanName) throw new Error('Place name is required');
+    const resolvedImg = input.sourceIdOrUrl?.trim()
+      ? resolveMediaUrl(
+          input.sourceType || 'embedded',
+          input.sourceIdOrUrl,
+          IMG_VELO_STAGE
+        )
+      : input.imageUrl?.trim()
+      ? sanitizeSafeMediaOrWebUrl(input.imageUrl, IMG_VELO_STAGE)
+      : IMG_VELO_STAGE;
+
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    const count = pool
+      ? await countTableRowsSql(pool, 'places_remembered')
+      : getPreviewStore().remembered.length;
+
+    const created: RememberedPlace = {
+      id: `REM-0${count + 1}-${Date.now().toString().slice(-3)}`,
+      name: cleanName,
+      closedSortIso: input.closedSortIso.trim().slice(0, 20) || '2024-12',
+      closedDisplayLabel:
+        input.closedDisplayLabel.trim().slice(0, 60) || 'Remembered Space',
+      location: input.location.trim().slice(0, 140) || 'Greenville, SC',
+      imageUrl: resolvedImg,
+      memorialStory: input.memorialStory.trim().slice(0, 900),
+      tags: normalizeTagsList(input.tags, ['venue', 'greenville']),
+    };
+
+    if (pool) {
+      await insertPlaceSql(pool, created);
+      return structuredClone(created);
+    }
+
+    const store = getPreviewStore();
+    store.remembered.unshift(created);
+    return structuredClone(created);
+  },
+
+  async updateRememberedPlace(
+    id: string,
+    input: {
+      name?: string;
+      closedSortIso?: string;
+      closedDisplayLabel?: string;
+      location?: string;
+      sourceType?: MediaSourceType;
+      sourceIdOrUrl?: string;
+      imageUrl?: string;
+      memorialStory?: string;
+      tags?: string[];
+    }
+  ): Promise<RememberedPlace | null> {
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    const target = pool
+      ? await getPlaceByIdSql(pool, id)
+      : getPreviewStore().remembered.find((r) => r.id === id) || null;
+    if (!target) return null;
+
+    if (typeof input.name === 'string' && input.name.trim()) {
+      target.name = input.name.trim().slice(0, 160);
+    }
+    if (typeof input.closedSortIso === 'string' && input.closedSortIso.trim()) {
+      target.closedSortIso = input.closedSortIso.trim().slice(0, 20);
+    }
+    if (
+      typeof input.closedDisplayLabel === 'string' &&
+      input.closedDisplayLabel.trim()
+    ) {
+      target.closedDisplayLabel = input.closedDisplayLabel.trim().slice(0, 60);
+    }
+    if (typeof input.location === 'string' && input.location.trim()) {
+      target.location = input.location.trim().slice(0, 140);
+    }
+    if (typeof input.memorialStory === 'string' && input.memorialStory.trim()) {
+      target.memorialStory = input.memorialStory.trim().slice(0, 900);
+    }
+    if (typeof input.sourceIdOrUrl === 'string' && input.sourceIdOrUrl.trim()) {
+      target.imageUrl = resolveMediaUrl(
+        input.sourceType || 'embedded',
+        input.sourceIdOrUrl,
+        target.imageUrl
+      );
+    } else if (typeof input.imageUrl === 'string' && input.imageUrl.trim()) {
+      target.imageUrl = sanitizeSafeMediaOrWebUrl(input.imageUrl, target.imageUrl);
+    }
+    if (Array.isArray(input.tags)) {
+      target.tags = normalizeTagsList(input.tags, ['venue', 'greenville']);
+    }
+
+    if (pool) {
+      await updatePlaceSql(pool, target);
+    }
+    return structuredClone(target);
+  },
+
+  async deleteRememberedPlace(id: string): Promise<boolean> {
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      return deletePlaceSql(pool, id);
+    }
+    const store = getPreviewStore();
+    const idx = store.remembered.findIndex((r) => r.id === id);
+    if (idx === -1) return false;
+    store.remembered.splice(idx, 1);
     return true;
   },
 
@@ -1499,7 +2302,6 @@ export const archiveRepository = {
   async appendSubscriberRow(
     input: Omit<SubscriberCsvRow, 'id' | 'createdAtIso'>
   ): Promise<SubscriberCsvRow> {
-    const store = await getStore();
     const row: SubscriberCsvRow = {
       id: `SUB-${Date.now()}`,
       createdAtIso: new Date().toISOString().slice(0, 10),
@@ -1508,29 +2310,92 @@ export const archiveRepository = {
       email: input.email.trim().toLowerCase().slice(0, 180),
       interests: input.interests.trim().slice(0, 500),
     };
+
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      await insertSubscriberSql(pool, row);
+      return structuredClone(row);
+    }
+
+    const store = getPreviewStore();
     store.subscribers.unshift(row);
-    await persistMysqlSnapshot(store);
     return structuredClone(row);
   },
 
+  async updateSubscriberRow(
+    id: string,
+    input: {
+      createdAtIso?: string;
+      source?: SubscriberCsvRow['source'];
+      name?: string;
+      email?: string;
+      interests?: string;
+    }
+  ): Promise<SubscriberCsvRow | null> {
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    const target = pool
+      ? await getSubscriberByIdSql(pool, id)
+      : getPreviewStore().subscribers.find((r) => r.id === id) || null;
+    if (!target) return null;
+
+    if (typeof input.createdAtIso === 'string' && input.createdAtIso.trim()) {
+      target.createdAtIso = input.createdAtIso.trim().slice(0, 32);
+    }
+    if (input.source === 'Message Us' || input.source === 'Live Chat') {
+      target.source = input.source;
+    }
+    if (typeof input.name === 'string' && input.name.trim()) {
+      target.name = input.name.trim().slice(0, 120);
+    }
+    if (typeof input.email === 'string' && input.email.trim()) {
+      const cleanEmail = input.email.trim().toLowerCase().slice(0, 180);
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+        throw new Error('Valid email address is required');
+      }
+      target.email = cleanEmail;
+    }
+    if (typeof input.interests === 'string') {
+      target.interests = input.interests.trim().slice(0, 500);
+    }
+
+    if (pool) {
+      await updateSubscriberSql(pool, target);
+    }
+    return structuredClone(target);
+  },
+
   async removeSubscriberRow(id: string): Promise<boolean> {
-    const store = await getStore();
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      return deleteSubscriberSql(pool, id);
+    }
+    const store = getPreviewStore();
     const idx = store.subscribers.findIndex((r) => r.id === id);
     if (idx === -1) return false;
     store.subscribers.splice(idx, 1);
-    await persistMysqlSnapshot(store);
     return true;
   },
 
   async listSubscribersAdminOnly(): Promise<SubscriberCsvRow[]> {
-    const store = await getStore();
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      return listSubscribersSql(pool);
+    }
+    const store = getPreviewStore();
     return structuredClone(store.subscribers);
   },
 
   async serializeSubscribersToCsv(): Promise<string> {
-    const store = await getStore();
-    const rows = store.subscribers;
-    const escapeCsv = (val: string) => `"${val.replace(/"/g, '""')}"`;
+    const rows = await this.listSubscribersAdminOnly();
+    const sanitizeSpreadsheetFormula = (raw: string): string => {
+      const cell = String(raw ?? '');
+      if (/^[=+\-@\t\r]/.test(cell)) {
+        return `'${cell}`;
+      }
+      return cell;
+    };
+    const escapeCsv = (val: string) =>
+      `"${sanitizeSpreadsheetFormula(val).replace(/"/g, '""')}"`;
     const header = 'Date,Source,Name,Email,Interests';
     const lines = rows.map((r) =>
       [r.createdAtIso, r.source, r.name, r.email, r.interests].map(escapeCsv).join(',')
@@ -1544,13 +2409,16 @@ export const archiveRepository = {
     auctionId?: string;
     sold: boolean;
   }): Promise<InstagramAuctionItem | null> {
-    const store = await getStore();
-    const target = store.auctions.find(
-      (a) =>
-        (identifier.auctionId && a.id === identifier.auctionId) ||
-        (identifier.igMediaId && a.igMediaId === identifier.igMediaId)
-    );
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    const target = pool
+      ? await findAuctionByMediaOrIdSql(pool, identifier)
+      : getPreviewStore().auctions.find(
+          (a) =>
+            (identifier.auctionId && a.id === identifier.auctionId) ||
+            (identifier.igMediaId && a.igMediaId === identifier.igMediaId)
+        ) || null;
     if (!target) return null;
+
     target.sold = identifier.sold;
     target.currentBidLabel = identifier.sold
       ? 'Marked SOLD (Verified)'
@@ -1559,7 +2427,10 @@ export const archiveRepository = {
       ...target.tags.filter((t) => t !== 'live' && t !== 'sold'),
       identifier.sold ? 'sold' : 'live',
     ];
-    await persistMysqlSnapshot(store);
+
+    if (pool) {
+      await updateAuctionSql(pool, target);
+    }
     return structuredClone(target);
   },
 
@@ -1570,61 +2441,282 @@ export const archiveRepository = {
     pickupArea?: string;
     sourceType?: MediaSourceType;
     sourceIdOrUrl?: string;
+    igMediaId?: string;
     igPermalink?: string;
+    tags?: string[];
   }): Promise<InstagramAuctionItem> {
-    const store = await getStore();
+    const cleanTitle = input.title.trim().slice(0, 140);
+    if (!cleanTitle) throw new Error('Auction title is required');
     const resolvedImg = resolveMediaUrl(
       input.sourceType || 'embedded',
       input.sourceIdOrUrl,
       IMG_BORO_GLASS
     );
+    const baseTags = normalizeTagsList(
+      (input.tags || []).filter((t) => t !== 'live' && t !== 'sold'),
+      ['vetted', 'greenville']
+    );
+
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    const count = pool
+      ? await countTableRowsSql(pool, 'auctions')
+      : getPreviewStore().auctions.length;
+
     const created: InstagramAuctionItem = {
-      id: `AUC-0${store.auctions.length + 1}-${Date.now().toString().slice(-3)}`,
-      title: input.title.trim().slice(0, 140),
-      ownerUsername: input.ownerUsername.trim().replace(/^@/, '').slice(0, 60),
-      currentBidLabel: `${input.openingBid.trim()} · Opening IG bid`,
-      pickupArea: (input.pickupArea || 'Greenville Local Pickup').trim(),
+      id: `AUC-0${count + 1}-${Date.now().toString().slice(-3)}`,
+      title: cleanTitle,
+      ownerUsername: input.ownerUsername.trim().replace(/^@/, '').slice(0, 60) || 'artist',
+      currentBidLabel: input.openingBid.includes('·')
+        ? input.openingBid.trim().slice(0, 120)
+        : `${input.openingBid.trim().slice(0, 60)} · Opening IG bid`,
+      pickupArea: (input.pickupArea || 'Greenville Local Pickup').trim().slice(0, 120),
       sourceType: input.sourceType || 'embedded',
       sourceIdOrUrl: (input.sourceIdOrUrl || '').trim(),
       imageUrl: resolvedImg,
-      igPermalink: (input.igPermalink || 'https://www.instagram.com/').trim(),
+      igMediaId: input.igMediaId?.trim().slice(0, 64) || undefined,
+      igPermalink: sanitizeHttpUrlOnly(
+        input.igPermalink,
+        'https://www.instagram.com/'
+      ),
       sold: false,
-      tags: ['vetted', 'greenville', 'live'],
+      tags: Array.from(new Set([...baseTags, 'live'])),
     };
+
+    if (pool) {
+      await insertAuctionSql(pool, created);
+      return structuredClone(created);
+    }
+
+    const store = getPreviewStore();
     store.auctions.unshift(created);
-    await persistMysqlSnapshot(store);
     return structuredClone(created);
+  },
+
+  async updateAuctionItem(
+    id: string,
+    input: {
+      title?: string;
+      ownerUsername?: string;
+      currentBidLabel?: string;
+      pickupArea?: string;
+      sourceType?: MediaSourceType;
+      sourceIdOrUrl?: string;
+      imageUrl?: string;
+      igMediaId?: string;
+      igPermalink?: string;
+      sold?: boolean;
+      tags?: string[];
+    }
+  ): Promise<InstagramAuctionItem | null> {
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    const target = pool
+      ? await getAuctionByIdSql(pool, id)
+      : getPreviewStore().auctions.find((a) => a.id === id) || null;
+    if (!target) return null;
+
+    if (typeof input.title === 'string' && input.title.trim()) {
+      target.title = input.title.trim().slice(0, 140);
+    }
+    if (typeof input.ownerUsername === 'string' && input.ownerUsername.trim()) {
+      target.ownerUsername = input.ownerUsername
+        .trim()
+        .replace(/^@/, '')
+        .slice(0, 60);
+    }
+    if (typeof input.currentBidLabel === 'string' && input.currentBidLabel.trim()) {
+      target.currentBidLabel = input.currentBidLabel.trim().slice(0, 120);
+    }
+    if (typeof input.pickupArea === 'string' && input.pickupArea.trim()) {
+      target.pickupArea = input.pickupArea.trim().slice(0, 120);
+    }
+    if (
+      input.sourceType &&
+      ['gdrive', 'r2', 'embedded'].includes(input.sourceType)
+    ) {
+      target.sourceType = input.sourceType;
+    }
+    if (typeof input.sourceIdOrUrl === 'string') {
+      target.sourceIdOrUrl = input.sourceIdOrUrl.trim();
+      if (target.sourceIdOrUrl) {
+        target.imageUrl = resolveMediaUrl(
+          target.sourceType || 'embedded',
+          target.sourceIdOrUrl,
+          target.imageUrl
+        );
+      }
+    }
+    if (typeof input.imageUrl === 'string' && input.imageUrl.trim()) {
+      target.imageUrl = sanitizeSafeMediaOrWebUrl(input.imageUrl, target.imageUrl);
+    }
+    if (typeof input.igMediaId === 'string') {
+      target.igMediaId = input.igMediaId.trim().slice(0, 64) || undefined;
+    }
+    if (typeof input.igPermalink === 'string' && input.igPermalink.trim()) {
+      target.igPermalink = sanitizeHttpUrlOnly(
+        input.igPermalink,
+        target.igPermalink
+      );
+    }
+    if (typeof input.sold === 'boolean') {
+      target.sold = input.sold;
+    }
+
+    const rawTags = Array.isArray(input.tags) ? input.tags : target.tags;
+    const baseTags = normalizeTagsList(
+      rawTags.filter((t) => t !== 'live' && t !== 'sold'),
+      ['vetted', 'greenville']
+    );
+    target.tags = Array.from(
+      new Set([...baseTags, target.sold ? 'sold' : 'live'])
+    );
+
+    if (pool) {
+      await updateAuctionSql(pool, target);
+    }
+    return structuredClone(target);
   },
 
   async deleteAuctionItem(id: string): Promise<boolean> {
-    const store = await getStore();
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      return deleteAuctionSql(pool, id);
+    }
+    const store = getPreviewStore();
     const idx = store.auctions.findIndex((a) => a.id === id);
     if (idx === -1) return false;
     store.auctions.splice(idx, 1);
-    await persistMysqlSnapshot(store);
     return true;
   },
 
-  // ==================== CALENDAR SHOWS ====================
-  async publishCalendarShow(
-    event: Omit<ShowCalendarEvent, 'id'>
-  ): Promise<ShowCalendarEvent> {
-    const store = await getStore();
+  // ==================== CALENDAR SHOWS (FULL YYYY-MM-DD + CUSTOM CSS) ====================
+  async publishCalendarShow(input: {
+    isoDate: string;
+    monthKey?: string;
+    dayOfMonth?: number;
+    title: string;
+    venue: string;
+    doorsInfo: string;
+    flyerStyle: FlyerPresetStyle;
+    flyerHeadlineNote: string;
+    scopedCustomCss?: string;
+    tags?: string[];
+  }): Promise<ShowCalendarEvent> {
+    const parsedDate = parseAndValidateIsoDate(input.isoDate);
+    const cleanTitle = input.title.trim().slice(0, 180);
+    const cleanVenue = input.venue.trim().slice(0, 120);
+    if (!cleanTitle || !cleanVenue) {
+      throw new Error('Show title and venue are required');
+    }
+    const flyerStyle: FlyerPresetStyle = [
+      'punk-xerox',
+      'concrete-stencil',
+      'riso-zine',
+      'custom-css',
+    ].includes(input.flyerStyle)
+      ? input.flyerStyle
+      : 'punk-xerox';
+
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    const count = pool
+      ? await countTableRowsSql(pool, 'calendar_shows')
+      : getPreviewStore().calendar.length;
+
     const created: ShowCalendarEvent = {
-      ...event,
-      id: `CAL-0${store.calendar.length + 1}-${Date.now().toString().slice(-3)}`,
+      id: `CAL-0${count + 1}-${Date.now().toString().slice(-3)}`,
+      isoDate: parsedDate.isoDate,
+      monthKey: parsedDate.monthKey,
+      dayOfMonth: parsedDate.dayOfMonth,
+      title: cleanTitle,
+      venue: cleanVenue,
+      doorsInfo: input.doorsInfo.trim().slice(0, 120) || '8:00 PM · DIY Bill',
+      flyerStyle,
+      flyerHeadlineNote: input.flyerHeadlineNote.trim().slice(0, 320),
+      scopedCustomCss: sanitizeScopedFlyerCss(input.scopedCustomCss),
+      tags: normalizeTagsList(input.tags || [], ['greenville', 'diy']),
     };
+
+    if (pool) {
+      await insertCalendarShowSql(pool, created);
+      return structuredClone(created);
+    }
+
+    const store = getPreviewStore();
     store.calendar.push(created);
-    await persistMysqlSnapshot(store);
+    store.calendar.sort((a, b) => a.isoDate.localeCompare(b.isoDate));
     return structuredClone(created);
   },
 
+  async updateCalendarShow(
+    id: string,
+    input: {
+      isoDate?: string;
+      title?: string;
+      venue?: string;
+      doorsInfo?: string;
+      flyerStyle?: FlyerPresetStyle;
+      flyerHeadlineNote?: string;
+      scopedCustomCss?: string;
+      tags?: string[];
+    }
+  ): Promise<ShowCalendarEvent | null> {
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    const target = pool
+      ? await getCalendarShowByIdSql(pool, id)
+      : getPreviewStore().calendar.find((c) => c.id === id) || null;
+    if (!target) return null;
+
+    if (typeof input.isoDate === 'string' && input.isoDate.trim()) {
+      const parsed = parseAndValidateIsoDate(input.isoDate);
+      target.isoDate = parsed.isoDate;
+      target.monthKey = parsed.monthKey;
+      target.dayOfMonth = parsed.dayOfMonth;
+    }
+    if (typeof input.title === 'string' && input.title.trim()) {
+      target.title = input.title.trim().slice(0, 180);
+    }
+    if (typeof input.venue === 'string' && input.venue.trim()) {
+      target.venue = input.venue.trim().slice(0, 120);
+    }
+    if (typeof input.doorsInfo === 'string' && input.doorsInfo.trim()) {
+      target.doorsInfo = input.doorsInfo.trim().slice(0, 120);
+    }
+    if (
+      input.flyerStyle &&
+      ['punk-xerox', 'concrete-stencil', 'riso-zine', 'custom-css'].includes(
+        input.flyerStyle
+      )
+    ) {
+      target.flyerStyle = input.flyerStyle;
+    }
+    if (typeof input.flyerHeadlineNote === 'string') {
+      target.flyerHeadlineNote = input.flyerHeadlineNote.trim().slice(0, 320);
+    }
+    if (typeof input.scopedCustomCss === 'string') {
+      target.scopedCustomCss = sanitizeScopedFlyerCss(input.scopedCustomCss);
+    }
+    if (Array.isArray(input.tags)) {
+      target.tags = normalizeTagsList(input.tags, ['greenville', 'diy']);
+    }
+
+    if (pool) {
+      await updateCalendarShowSql(pool, target);
+      return structuredClone(target);
+    }
+
+    const store = getPreviewStore();
+    store.calendar.sort((a, b) => a.isoDate.localeCompare(b.isoDate));
+    return structuredClone(target);
+  },
+
   async deleteCalendarShow(id: string): Promise<boolean> {
-    const store = await getStore();
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      return deleteCalendarShowSql(pool, id);
+    }
+    const store = getPreviewStore();
     const idx = store.calendar.findIndex((c) => c.id === id);
     if (idx === -1) return false;
     store.calendar.splice(idx, 1);
-    await persistMysqlSnapshot(store);
     return true;
   },
 
@@ -1635,10 +2727,6 @@ export const archiveRepository = {
     text: string,
     timestampSec?: number
   ): Promise<CommentNode> {
-    const store = await getStore();
-    if (!store.commentsByItem[targetItemId]) {
-      store.commentsByItem[targetItemId] = [];
-    }
     const cleanTs =
       typeof timestampSec === 'number' && Number.isFinite(timestampSec) && timestampSec >= 0
         ? Math.floor(timestampSec)
@@ -1653,8 +2741,18 @@ export const archiveRepository = {
       createdAtIso: new Date().toISOString(),
       replies: [],
     };
+
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      await insertCommentSql(pool, node);
+      return structuredClone(node);
+    }
+
+    const store = getPreviewStore();
+    if (!store.commentsByItem[targetItemId]) {
+      store.commentsByItem[targetItemId] = [];
+    }
     store.commentsByItem[targetItemId].unshift(node);
-    await persistMysqlSnapshot(store);
     return structuredClone(node);
   },
 
@@ -1663,12 +2761,17 @@ export const archiveRepository = {
     commentId: string,
     delta: 1 | -1
   ): Promise<CommentNode | null> {
-    const store = await getStore();
+    const safeDelta: 1 | -1 = delta === -1 ? -1 : 1;
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      return voteCommentAtomicSql(pool, targetItemId, commentId, safeDelta);
+    }
+
+    const store = getPreviewStore();
     const list = store.commentsByItem[targetItemId] || [];
     const target = list.find((c) => c.id === commentId);
     if (!target) return null;
-    target.votes += delta;
-    await persistMysqlSnapshot(store);
+    target.votes += safeDelta;
     return structuredClone(target);
   },
 
@@ -1678,28 +2781,38 @@ export const archiveRepository = {
     author: string,
     text: string
   ): Promise<CommentNode | null> {
-    const store = await getStore();
-    const list = store.commentsByItem[targetItemId] || [];
-    const target = list.find((c) => c.id === commentId);
-    if (!target) return null;
-    target.replies.push({
+    const reply: CommentReply = {
       id: `RPL-${Date.now()}`,
       author: author.trim().replace(/^@/, '').slice(0, 50) || 'anon',
       text: text.trim().slice(0, 400),
       createdAtIso: new Date().toISOString(),
-    });
-    await persistMysqlSnapshot(store);
+    };
+
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      return appendCommentReplySql(pool, targetItemId, commentId, reply);
+    }
+
+    const store = getPreviewStore();
+    const list = store.commentsByItem[targetItemId] || [];
+    const target = list.find((c) => c.id === commentId);
+    if (!target) return null;
+    target.replies.push(reply);
     return structuredClone(target);
   },
 
   async deleteComment(targetItemId: string, commentId: string): Promise<boolean> {
-    const store = await getStore();
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      return deleteCommentSql(pool, targetItemId, commentId);
+    }
+
+    const store = getPreviewStore();
     const list = store.commentsByItem[targetItemId];
     if (!list) return false;
     const idx = list.findIndex((c) => c.id === commentId);
     if (idx === -1) return false;
     list.splice(idx, 1);
-    await persistMysqlSnapshot(store);
     return true;
   },
 
@@ -1708,9 +2821,14 @@ export const archiveRepository = {
     sceneChat: SceneChatMessage[];
     auctions: InstagramAuctionItem[];
   }> {
-    const store = await getStore();
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      return fetchLivePollSnapshotSql(pool);
+    }
+
+    const store = getPreviewStore();
     return {
-      sceneChat: structuredClone(store.sceneChat),
+      sceneChat: structuredClone(store.sceneChat.slice(-PREVIEW_SCENE_CHAT_DISPLAY)),
       auctions: structuredClone(store.auctions),
     };
   },
@@ -1719,7 +2837,6 @@ export const archiveRepository = {
     who: string,
     msg: string
   ): Promise<SceneChatMessage[]> {
-    const store = await getStore();
     const d = new Date();
     const timeLabel =
       (d.getHours() % 12 || 12) +
@@ -1733,23 +2850,56 @@ export const archiveRepository = {
       msg: msg.trim().slice(0, 280),
       createdAtIso: d.toISOString(),
     };
-    store.sceneChat = [...store.sceneChat.slice(-39), entry];
-    await persistMysqlSnapshot(store);
-    return structuredClone(store.sceneChat);
+
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      return appendSceneChatSql(pool, entry);
+    }
+
+    const store = getPreviewStore();
+    store.sceneChat = [
+      ...store.sceneChat.slice(-(PREVIEW_SCENE_CHAT_MAX_STORED - 1)),
+      entry,
+    ];
+    return structuredClone(store.sceneChat.slice(-PREVIEW_SCENE_CHAT_DISPLAY));
   },
 
-  // ==================== PASS 5 NEXT-ROUND LEDGER ====================
+  async deleteSceneChatMessage(id: string): Promise<boolean> {
+    const cleanId = String(id || '').trim();
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      return deleteSceneChatSql(pool, cleanId);
+    }
+
+    const store = getPreviewStore();
+    const idx = store.sceneChat.findIndex((m) => m.id === cleanId);
+    if (idx === -1) return false;
+    store.sceneChat.splice(idx, 1);
+    return true;
+  },
+
+  // ==================== NEXT-ROUND LEDGER ====================
   async addFutureTask(
     input: Omit<FutureTaskLedgerItem, 'id' | 'createdAtIso'>
   ): Promise<FutureTaskLedgerItem> {
-    const store = await getStore();
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    const count = pool
+      ? await countTableRowsSql(pool, 'future_tasks')
+      : getPreviewStore().futureTasks.length;
+
     const item: FutureTaskLedgerItem = {
       ...input,
-      id: `P5-0${store.futureTasks.length + 1}-${Date.now().toString().slice(-2)}`,
+      id: `P7-0${count + 1}-${Date.now().toString().slice(-2)}`,
       createdAtIso: new Date().toISOString(),
     };
+
+    if (pool) {
+      await insertFutureTaskSql(pool, item);
+      return structuredClone(item);
+    }
+
+    const store = getPreviewStore();
     store.futureTasks.unshift(item);
-    await persistMysqlSnapshot(store);
     return structuredClone(item);
   },
 
@@ -1757,32 +2907,48 @@ export const archiveRepository = {
     id: string,
     status: TaskStatus
   ): Promise<FutureTaskLedgerItem | null> {
-    const store = await getStore();
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      return updateFutureTaskStatusSql(pool, id, status);
+    }
+
+    const store = getPreviewStore();
     const item = store.futureTasks.find((t) => t.id === id);
     if (!item) return null;
     item.status = status;
-    await persistMysqlSnapshot(store);
     return structuredClone(item);
   },
 
   async deleteFutureTask(id: string): Promise<boolean> {
-    const store = await getStore();
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      return deleteFutureTaskSql(pool, id);
+    }
+
+    const store = getPreviewStore();
     const idx = store.futureTasks.findIndex((t) => t.id === id);
     if (idx === -1) return false;
     store.futureTasks.splice(idx, 1);
-    await persistMysqlSnapshot(store);
     return true;
   },
 
   // ==================== PUCK VISUAL STUDIO PAGES & SLOTS ====================
   async listPuckPages(): Promise<PuckPageRecord[]> {
-    const store = await getStore();
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      return listPuckPagesSql(pool);
+    }
+    const store = getPreviewStore();
     return structuredClone(store.puckPages);
   },
 
   async getPuckPageBySlug(slug: string): Promise<PuckPageRecord | null> {
-    const store = await getStore();
     const clean = slug.trim();
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      return getPuckPageBySlugSql(pool, clean);
+    }
+    const store = getPreviewStore();
     const found = store.puckPages.find((p) => p.slug === clean);
     return found ? structuredClone(found) : null;
   },
@@ -1795,17 +2961,43 @@ export const archiveRepository = {
       puckData: PuckSerializedData;
     }
   ): Promise<PuckPageRecord> {
-    const store = await getStore();
     const cleanSlug = slug.trim();
     const nowIso = new Date().toISOString();
-    let target = store.puckPages.find((p) => p.slug === cleanSlug);
-
     const safePuckData: PuckSerializedData = {
       root: input.puckData?.root || { props: { title: input.title || cleanSlug } },
       content: Array.isArray(input.puckData?.content) ? input.puckData.content : [],
       ...(input.puckData?.zones ? { zones: input.puckData.zones } : {}),
     };
 
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      const existing = await getPuckPageBySlugSql(pool, cleanSlug);
+      const nextPage: PuckPageRecord = existing
+        ? {
+            ...existing,
+            title:
+              typeof input.title === 'string' && input.title.trim()
+                ? input.title.trim().slice(0, 180)
+                : existing.title,
+            published:
+              typeof input.published === 'boolean' ? input.published : existing.published,
+            puckData: safePuckData,
+            updatedAtIso: nowIso,
+          }
+        : {
+            slug: cleanSlug,
+            title: (input.title || cleanSlug).trim().slice(0, 180),
+            isSlot: cleanSlug.startsWith('slot:'),
+            published: input.published ?? true,
+            puckData: safePuckData,
+            updatedAtIso: nowIso,
+          };
+      await upsertPuckPageSql(pool, nextPage);
+      return structuredClone(nextPage);
+    }
+
+    const store = getPreviewStore();
+    let target = store.puckPages.find((p) => p.slug === cleanSlug);
     if (target) {
       if (typeof input.title === 'string' && input.title.trim()) {
         target.title = input.title.trim().slice(0, 180);
@@ -1827,32 +3019,6 @@ export const archiveRepository = {
       store.puckPages.push(target);
     }
 
-    await persistMysqlSnapshot(store);
-    const pool = getMysqlPool();
-    if (pool) {
-      try {
-        await pool.query(
-          `INSERT INTO puck_pages (slug, title, is_slot, published, puck_data, updated_at_iso)
-           VALUES (?, ?, ?, ?, ?, ?)
-           ON DUPLICATE KEY UPDATE
-             title = VALUES(title),
-             published = VALUES(published),
-             puck_data = VALUES(puck_data),
-             updated_at_iso = VALUES(updated_at_iso)`,
-          [
-            target.slug,
-            target.title,
-            target.isSlot ? 1 : 0,
-            target.published ? 1 : 0,
-            JSON.stringify(target.puckData),
-            target.updatedAtIso,
-          ]
-        );
-      } catch {
-        // Snapshot already persisted
-      }
-    }
-
     return structuredClone(target);
   },
 
@@ -1860,7 +3026,6 @@ export const archiveRepository = {
     slug: string;
     title: string;
   }): Promise<PuckPageRecord> {
-    const store = await getStore();
     const cleanSlug = input.slug
       .trim()
       .toLowerCase()
@@ -1873,9 +3038,17 @@ export const archiveRepository = {
       throw new Error('Valid URL slug required');
     }
 
-    const existing = store.puckPages.find((p) => p.slug === cleanSlug);
-    if (existing) {
-      return structuredClone(existing);
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      const existing = await getPuckPageBySlugSql(pool, cleanSlug);
+      if (existing) {
+        return structuredClone(existing);
+      }
+    } else {
+      const existing = getPreviewStore().puckPages.find((p) => p.slug === cleanSlug);
+      if (existing) {
+        return structuredClone(existing);
+      }
     }
 
     const cleanTitle = (input.title || cleanSlug).trim().slice(0, 180);
@@ -1906,53 +3079,37 @@ export const archiveRepository = {
       },
     };
 
-    store.puckPages.push(created);
-    await persistMysqlSnapshot(store);
-    const pool = getMysqlPool();
     if (pool) {
-      try {
-        await pool.query(
-          `INSERT INTO puck_pages (slug, title, is_slot, published, puck_data, updated_at_iso)
-           VALUES (?, ?, 0, 1, ?, ?)`,
-          [created.slug, created.title, JSON.stringify(created.puckData), created.updatedAtIso]
-        );
-      } catch {
-        // Non-fatal
-      }
+      await upsertPuckPageSql(pool, created);
+      return structuredClone(created);
     }
 
+    const store = getPreviewStore();
+    store.puckPages.push(created);
     return structuredClone(created);
   },
 
   async deleteCustomPuckPage(slug: string): Promise<boolean> {
-    const store = await getStore();
     const cleanSlug = slug.trim();
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      return deleteOrClearPuckPageSql(pool, cleanSlug);
+    }
+
+    const store = getPreviewStore();
     const idx = store.puckPages.findIndex((p) => p.slug === cleanSlug);
     if (idx === -1) return false;
 
-    // Built-in inline slots are cleared rather than deleted so slot keys remain stable
     if (store.puckPages[idx].isSlot) {
       store.puckPages[idx].puckData = {
         root: { props: { title: store.puckPages[idx].title } },
         content: [],
       };
       store.puckPages[idx].updatedAtIso = new Date().toISOString();
-      await persistMysqlSnapshot(store);
       return true;
     }
 
     store.puckPages.splice(idx, 1);
-    await persistMysqlSnapshot(store);
-    const pool = getMysqlPool();
-    if (pool) {
-      try {
-        await pool.query('DELETE FROM puck_pages WHERE slug = ? AND is_slot = 0', [
-          cleanSlug,
-        ]);
-      } catch {
-        // Non-fatal
-      }
-    }
     return true;
   },
 };

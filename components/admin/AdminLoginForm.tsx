@@ -5,7 +5,11 @@ import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { ArrowLeft, KeyRound, Lock, Unlock } from 'lucide-react';
-import { ArchiveDataset, RuntimePostureSnapshot } from '@/types/archive';
+import {
+  ArchiveDataset,
+  AuditLogEntry,
+  RuntimePostureSnapshot,
+} from '@/types/archive';
 import {
   adminFetch,
   setAdminMemoryToken,
@@ -15,15 +19,18 @@ import LiquidGlassStage from '@/components/fx/LiquidGlassStage';
 export type AdminHydratedPayload = ArchiveDataset & {
   storageDriver: 'hostinger-mysql' | 'preview-memory';
   runtimePosture?: RuntimePostureSnapshot;
+  auditLogs?: AuditLogEntry[];
 };
 
 interface AdminLoginFormProps {
   demoModeAvailable?: boolean;
+  setupError?: string;
   onUnlocked?: (payload: AdminHydratedPayload) => void;
 }
 
 export default function AdminLoginForm({
   demoModeAvailable = true,
+  setupError,
   onUnlocked,
 }: AdminLoginFormProps) {
   const router = useRouter();
@@ -32,6 +39,7 @@ export default function AdminLoginForm({
   const [submitting, setSubmitting] = useState(false);
 
   const completeUnlock = async (body: Record<string, string>) => {
+    if (setupError) return;
     setSubmitting(true);
     setErrorMsg(null);
     try {
@@ -68,7 +76,7 @@ export default function AdminLoginForm({
 
   const handlePasskeySubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!passkey.trim()) return;
+    if (!passkey.trim() || setupError) return;
     void completeUnlock({ mode: 'passkey', passkey: passkey.trim() });
   };
 
@@ -97,12 +105,26 @@ export default function AdminLoginForm({
           Greenville DIY · Admin Manager
         </h1>
         <p className="text-xs text-[var(--ink-2)] mb-5 leading-relaxed">
-          {demoModeAvailable
+          {setupError
+            ? 'Production fail-closed posture active: configure required Hostinger environment secrets before curator sign-in.'
+            : demoModeAvailable
             ? 'Port 3000 Demo Posture active: unlock in one click below, or test passkey login before Hostinger cutover.'
             : 'Hostinger Production Posture active: enter your curator passkey to manage archive records.'}
         </p>
 
-        {demoModeAvailable && (
+        {setupError && (
+          <div
+            role="alert"
+            className="mb-5 text-xs font-mono text-[var(--cta-bright)] px-3 py-2.5 rounded-[var(--r-key)] bg-[var(--accent-soft)] border border-[var(--accent)] leading-relaxed"
+          >
+            <div className="font-bold uppercase tracking-wider mb-1">
+              503 · Production Setup Required
+            </div>
+            <div>{setupError}</div>
+          </div>
+        )}
+
+        {!setupError && demoModeAvailable && (
           <div className="mb-5">
             <button
               type="button"
@@ -118,7 +140,7 @@ export default function AdminLoginForm({
           </div>
         )}
 
-        {demoModeAvailable && (
+        {!setupError && demoModeAvailable && (
           <div className="flex items-center gap-3 my-4 text-[11px] font-mono text-[var(--ink-mono)]">
             <span className="h-px flex-1 bg-[var(--grid-hairline)]" />
             <span>or curator passkey</span>
@@ -135,6 +157,7 @@ export default function AdminLoginForm({
               id="admin-curator-passkey"
               type="password"
               required
+              disabled={Boolean(setupError)}
               value={passkey}
               onChange={(e) => setPasskey(e.target.value)}
               placeholder={
@@ -152,7 +175,7 @@ export default function AdminLoginForm({
 
           <button
             type="submit"
-            disabled={submitting || !passkey.trim()}
+            disabled={submitting || !passkey.trim() || Boolean(setupError)}
             className="btn-arch w-full py-2 justify-center"
           >
             <KeyRound className="w-3.5 h-3.5" />

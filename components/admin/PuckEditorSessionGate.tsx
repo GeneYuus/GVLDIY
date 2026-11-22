@@ -27,6 +27,7 @@ interface PuckEditorSessionGateProps {
   slug: string;
   initialPage: PuckPageRecord | null;
   demoModeAvailable: boolean;
+  setupError?: string;
   seasonTheme: SeasonTheme;
   defaultContrast: ContrastMode;
 }
@@ -35,6 +36,7 @@ export default function PuckEditorSessionGate({
   slug,
   initialPage,
   demoModeAvailable,
+  setupError,
   seasonTheme,
   defaultContrast,
 }: PuckEditorSessionGateProps) {
@@ -73,7 +75,7 @@ export default function PuckEditorSessionGate({
   }, [slug]);
 
   useEffect(() => {
-    if (page || !memoryToken) return;
+    if (page || !memoryToken || setupError) return;
     let cancelled = false;
 
     adminFetch(`/api/admin/puck?slug=${encodeURIComponent(slug)}`)
@@ -96,7 +98,7 @@ export default function PuckEditorSessionGate({
     return () => {
       cancelled = true;
     };
-  }, [page, memoryToken, slug]);
+  }, [page, memoryToken, slug, setupError]);
 
   if (notFoundErr) {
     return (
@@ -115,7 +117,7 @@ export default function PuckEditorSessionGate({
     return <PuckEditorClient page={page} />;
   }
 
-  if (memoryToken && !resolvedTokenCheck) {
+  if (memoryToken && !resolvedTokenCheck && !setupError) {
     return (
       <div className="min-h-screen flex items-center justify-center font-mono text-xs text-[var(--mute)]">
         Opening Puck Visual Studio...
@@ -126,6 +128,7 @@ export default function PuckEditorSessionGate({
   return (
     <AdminLoginForm
       demoModeAvailable={demoModeAvailable}
+      setupError={setupError}
       onUnlocked={(payload) => {
         const matched = payload.puckPages?.find((p) => p.slug === slug);
         if (matched) {

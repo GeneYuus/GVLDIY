@@ -4,6 +4,7 @@ import type { Config, Slot } from '@puckeditor/core';
 import { ArrowUpRight } from 'lucide-react';
 import { MediaSourceType } from '@/types/archive';
 import { resolveMediaUrl } from '@/lib/media/resolveMediaUrl';
+import { sanitizeSafeHref } from '@/lib/security/sanitize';
 
 export type ArchivePuckProps = {
   LiquidGlassBanner: {
@@ -133,6 +134,10 @@ export const puckConfig: Config<ArchivePuckProps> = {
         accentStyle,
       }) => {
         const tone = ACCENT_HEX[accentStyle] || ACCENT_HEX.neutral;
+        const safeHref = ctaUrl ? sanitizeSafeHref(ctaUrl) : null;
+        const isExternalHttp =
+          safeHref !== null && /^https?:\/\//i.test(safeHref);
+
         return (
           <section
             className="glass-panel p-5 sm:p-6 mb-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
@@ -157,16 +162,26 @@ export const puckConfig: Config<ArchivePuckProps> = {
               )}
             </div>
 
-            {ctaLabel && ctaUrl && (
+            {ctaLabel && safeHref ? (
               <a
-                href={ctaUrl}
+                href={safeHref}
+                target={isExternalHttp ? '_blank' : undefined}
+                rel={isExternalHttp ? 'noopener noreferrer' : undefined}
                 className="btn-arch shrink-0 self-start sm:self-center text-white border-transparent"
                 style={{ backgroundColor: tone.cta }}
               >
                 <span>{ctaLabel}</span>
                 <ArrowUpRight className="w-3.5 h-3.5" />
               </a>
-            )}
+            ) : ctaLabel && ctaUrl ? (
+              <button
+                type="button"
+                disabled
+                className="btn-arch shrink-0 self-start sm:self-center opacity-50 cursor-not-allowed select-none"
+              >
+                <span>{ctaLabel}</span>
+              </button>
+            ) : null}
           </section>
         );
       },

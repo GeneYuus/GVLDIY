@@ -1,6 +1,7 @@
 // app/admin/editor/[slug]/page.tsx
 import { notFound } from 'next/navigation';
 import {
+  checkProductionAuthPosture,
   isPreviewDemoModeEnabled,
   verifyAdminSession,
 } from '@/lib/dal/auth';
@@ -20,8 +21,24 @@ export default async function AdminPuckEditorPage({
     notFound();
   }
 
-  const authenticated = await verifyAdminSession();
+  const prodPosture = checkProductionAuthPosture();
   const demoModeAvailable = isPreviewDemoModeEnabled();
+
+  if (!prodPosture.ok) {
+    const publicPayload = await archiveRepository.getPublicPayload();
+    return (
+      <PuckEditorSessionGate
+        slug={decodedSlug}
+        initialPage={null}
+        demoModeAvailable={false}
+        setupError={prodPosture.reason}
+        seasonTheme={publicPayload.siteSettings.seasonTheme}
+        defaultContrast={publicPayload.siteSettings.defaultContrast}
+      />
+    );
+  }
+
+  const authenticated = await verifyAdminSession();
 
   if (authenticated) {
     const [page, publicPayload] = await Promise.all([

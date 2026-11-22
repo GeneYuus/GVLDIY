@@ -117,6 +117,7 @@ export interface TimelineEra {
   title: string;
   summary: string;
   portholeImageUrl: string;
+  sortOrder?: number;
 }
 
 export interface RememberedPlace {
@@ -218,11 +219,26 @@ export interface PuckPageRecord {
 export type TaskPriority = 'P0' | 'P1' | 'P2';
 export type TaskStatus = 'Planned' | 'In Progress' | 'Deferred' | 'Completed';
 
+export interface AuditLogEntry {
+  id: string;
+  curatorUsername: string;
+  actionName: string;
+  targetId: string | null;
+  createdAtIso: string;
+}
+
 export interface FutureTaskLedgerItem {
   id: string;
-  passPhase: 'Pass 5' | 'Pass 6' | 'Hostinger' | 'Storage / CDN';
+  passPhase:
+    | 'Pass 5'
+    | 'Pass 6'
+    | 'Pass 7'
+    | 'Pass 8'
+    | 'Hostinger'
+    | 'Storage / CDN';
   title: string;
   area:
+    | 'Auth & Security'
     | 'Puck Visual Studio'
     | 'UI & Media'
     | 'Hostinger MySQL'
@@ -242,6 +258,8 @@ export interface RuntimePostureSnapshot {
   mysqlHostDisplay: string;
   demoUnlockEnabled: boolean;
   adminPasskeyConfigured: boolean;
+  adminPasswordHashConfigured?: boolean;
+  productionAuthReady?: boolean;
   sessionSecretConfigured: boolean;
   driveProxyConfigured: boolean;
   r2PublicDomain: string;

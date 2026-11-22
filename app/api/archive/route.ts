@@ -1,5 +1,11 @@
 // app/api/archive/route.ts
 import { NextRequest, NextResponse } from 'next/server';
+import {
+  checkPublicWriteRateLimit,
+  claimCommentVoteOnce,
+  extractClientIpHash,
+  readBoundedJsonBody,
+} from '@/lib/security/publicRequestGuard';
 import { archiveRepository } from '@/lib/storage/repository';
 
 export async function GET(req: NextRequest) {
@@ -18,47 +24,115 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  const ipHash = extractClientIpHash(req);
+  const rateCheck = checkPublicWriteRateLimit(ipHash, 'public-archive', 6);
+  if (!rateCheck.allowed) {
+    return NextResponse.json(
+      {
+        error: `Rate limit reached (max 6 posts/min). Retry in ${rateCheck.retryAfterSec}s.`,
+      },
+      {
+        status: 429,
+        headers: { 'Retry-After': String(rateCheck.retryAfterSec) },
+      }
+    );
+  }
+
+  const parsed = await readBoundedJsonBody<Record<string, unknown>>(req, 8192);
+  if (!parsed.ok) {
+    return NextResponse.json({ error: parsed.error }, { status: parsed.status });
+  }
+
   try {
-    const body = await req.json();
-    const { action, targetItemId, commentId, author, text, delta, timestampSec, who, msg } = body;
+    const body = parsed.data;
+    const {
+      action,
+      targetItemId,
+      commentId,
+      author,
+      text,
+      delta,
+      timestampSec,
+      who,
+      msg,
+    } = body;
 
     if (action === 'send-chat') {
       if (!msg || typeof msg !== 'string' || !msg.trim()) {
         return NextResponse.json({ error: 'Empty chat message' }, { status: 400 });
       }
       const sceneChat = await archiveRepository.appendSceneChatMessage(
-        typeof who === 'string' ? who : 'visitor',
-        msg
+        typeof who === 'string' ? who.slice(0, 60) : 'visitor',
+        msg.slice(0, 400)
       );
       return NextResponse.json({ ok: true, sceneChat });
     }
 
     if (action === 'add-comment') {
-      if (!targetItemId || !author || !text) {
+      if (
+        typeof targetItemId !== 'string' ||
+        typeof author !== 'string' ||
+        typeof text !== 'string' ||
+        !targetItemId.trim() ||
+        !author.trim() ||
+        !text.trim()
+      ) {
         return NextResponse.json({ error: 'Missing comment fields' }, { status: 400 });
       }
       const created = await archiveRepository.addComment(
-        targetItemId,
-        author,
-        text,
-        typeof timestampSec === 'number' ? timestampSec : undefined
+        targetItemId.trim().slice(0, 64),
+        author.trim().slice(0, 80),
+        text.trim().slice(0, 1200),
+        typeof timestampSec === 'number' && Number.isFinite(timestampSec)
+          ? Math.max(0, Math.floor(timestampSec))
+          : undefined
       );
       return NextResponse.json({ ok: true, comment: created });
     }
 
     if (action === 'vote-comment') {
-      if (!targetItemId || !commentId || (delta !== 1 && delta !== -1)) {
+      if (
+        typeof targetItemId !== 'string' ||
+        typeof commentId !== 'string' ||
+        !targetItemId.trim() ||
+        !commentId.trim() ||
+        (delta !== 1 && delta !== -1)
+      ) {
         return NextResponse.json({ error: 'Invalid vote payload' }, { status: 400 });
       }
-      const updated = await archiveRepository.voteComment(targetItemId, commentId, delta);
+      if (!claimCommentVoteOnce(ipHash, commentId)) {
+        return NextResponse.json(
+          { error: 'Vote already recorded for this comment' },
+          { status: 429 }
+        );
+      }
+      const updated = await archiveRepository.voteComment(
+        targetItemId.trim(),
+        commentId.trim(),
+        delta
+      );
       return NextResponse.json({ ok: true, comment: updated });
     }
 
     if (action === 'reply-comment') {
-      if (!targetItemId || !commentId || !author || !text) {
+      if (
+        typeof targetItemId !== 'string' ||
+        typeof commentId !== 'string' ||
+        typeof author !== 'string' ||
+        typeof text !== 'string' ||
+        !targetItemId.trim() ||
+        !commentId.trim() ||
+        !author.trim() ||
+        !text.trim()
+      ) {
         return NextResponse.json({ error: 'Missing reply fields' }, { status: 400 });
       }
-      const updated = await archiveRepository.addReply(targetItemId, commentId, author, text);
+      const updated = await archiveRepository.addReply(
+        targetItemId.trim().slice(0, 64),
+        commentId.trim().slice(0, 64),
+        author.trim().slice(0, 80),
+        text.trim().slice(0, 800)
+      );
       return NextResponse.json({ ok: true, comment: updated });
     }
 

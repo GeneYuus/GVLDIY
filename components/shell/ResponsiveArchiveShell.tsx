@@ -47,6 +47,7 @@ import {
   useAdminMemoryToken,
 } from '@/lib/dal/adminClientSession';
 import LiquidGlassStage from '@/components/fx/LiquidGlassStage';
+import { sanitizeSafeHref } from '@/lib/security/sanitize';
 
 interface ResponsiveArchiveShellProps {
   initialPayload: PublicArchivePayload;
@@ -1337,7 +1338,7 @@ export default function ResponsiveArchiveShell({
               <div className="sec-head">
                 <div>
                   <div className="sec-kicker">
-                    06 / 08 · Chronological Portal Chain
+                    Scene History · Greenville DIY
                   </div>
                   <h2 className="sec-title">Timeline</h2>
                 </div>
@@ -1416,13 +1417,28 @@ export default function ResponsiveArchiveShell({
                   </div>
                   <h2 className="sec-title">Auctions</h2>
                 </div>
-                <a
-                  href={`mailto:${siteSettings.auctionSubmissionEmail}?subject=Artist%20Auction%20Submission`}
-                  className="typo-action typo-action-accent"
-                >
-                  <span>+ List Work</span>
-                  <ArrowUpRight className="w-3.5 h-3.5" />
-                </a>
+                {(() => {
+                  const safeListWorkHref = sanitizeSafeHref(
+                    `mailto:${String(siteSettings.auctionSubmissionEmail || '').trim()}?subject=Artist%20Auction%20Submission`
+                  );
+                  return safeListWorkHref ? (
+                    <a
+                      href={safeListWorkHref}
+                      className="typo-action typo-action-accent"
+                    >
+                      <span>+ List Work</span>
+                      <ArrowUpRight className="w-3.5 h-3.5" />
+                    </a>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled
+                      className="typo-action opacity-50 cursor-not-allowed select-none"
+                    >
+                      + List Work
+                    </button>
+                  );
+                })()}
               </div>
               {renderSearchAndTags(
                 'auction',
@@ -1430,14 +1446,13 @@ export default function ResponsiveArchiveShell({
                 ['glass', 'pedal', 'print', 'live', 'sold']
               )}
               <div className="brutal-grid">
-                {filteredAuctions.map((a) => (
-                  <article key={a.id} className="arch-plate group">
-                    <a
-                      href={a.igPermalink}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="block text-inherit hover:no-underline h-full"
-                    >
+                {filteredAuctions.map((a) => {
+                  const safeIgHref = sanitizeSafeHref(a.igPermalink);
+                  const isExternalIg =
+                    safeIgHref !== null && /^https?:\/\//i.test(safeIgHref);
+
+                  const cardInner = (
+                    <>
                       <div className="relative">
                         {/* eslint-disable-next-line @next/next/no-img-element */}
                         <img
@@ -1466,15 +1481,40 @@ export default function ResponsiveArchiveShell({
                           <span className="font-mono text-xs font-bold text-[var(--accent)] tabular-nums">
                             {a.currentBidLabel}
                           </span>
-                          <span className="typo-action typo-action-accent !py-0">
-                            <span>{a.sold ? 'View Post' : 'Bid on IG'}</span>
-                            <ArrowUpRight className="w-3.5 h-3.5" />
-                          </span>
+                          {safeIgHref ? (
+                            <span className="typo-action typo-action-accent !py-0">
+                              <span>{a.sold ? 'View Post' : 'Bid on IG'}</span>
+                              <ArrowUpRight className="w-3.5 h-3.5" />
+                            </span>
+                          ) : (
+                            <span className="typo-action !py-0 opacity-50 cursor-not-allowed select-none">
+                              Link Unavailable
+                            </span>
+                          )}
                         </div>
                       </div>
-                    </a>
-                  </article>
-                ))}
+                    </>
+                  );
+
+                  return (
+                    <article key={a.id} className="arch-plate group">
+                      {safeIgHref ? (
+                        <a
+                          href={safeIgHref}
+                          target={isExternalIg ? '_blank' : undefined}
+                          rel={isExternalIg ? 'noopener noreferrer' : undefined}
+                          className="block text-inherit hover:no-underline h-full"
+                        >
+                          {cardInner}
+                        </a>
+                      ) : (
+                        <div className="block text-inherit h-full">
+                          {cardInner}
+                        </div>
+                      )}
+                    </article>
+                  );
+                })}
               </div>
             </div>
           )}
