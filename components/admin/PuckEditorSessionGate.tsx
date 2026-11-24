@@ -106,7 +106,7 @@ export default function PuckEditorSessionGate({
         <p className="font-mono text-sm text-[var(--ink)]">
           Puck layout &ldquo;{slug}&rdquo; was not found.
         </p>
-        <Link href="/admin" className="btn-arch active">
+        <Link href="/admin" prefetch={false} className="btn-arch active">
           Back to Admin Manager
         </Link>
       </div>

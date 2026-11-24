@@ -83,6 +83,14 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const declaredLength = Number(req.headers.get('content-length') || 0);
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_WEBHOOK_BYTES) {
+    return NextResponse.json(
+      { error: 'Webhook payload too large' },
+      { status: 413 }
+    );
+  }
+
   try {
     const rawBody = await req.text();
     if (Buffer.byteLength(rawBody, 'utf8') > MAX_WEBHOOK_BYTES) {
@@ -100,8 +108,16 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const payload = JSON.parse(rawBody);
-    const entries = Array.isArray(payload.entry) ? payload.entry : [];
+    const payload: unknown = JSON.parse(rawBody);
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      return NextResponse.json(
+        { error: 'Webhook JSON object body required' },
+        { status: 400 }
+      );
+    }
+
+    const payloadObj = payload as { entry?: unknown };
+    const entries = Array.isArray(payloadObj.entry) ? payloadObj.entry : [];
     const publicPayload = await archiveRepository.getPublicPayload();
 
     const updatedItems = [];

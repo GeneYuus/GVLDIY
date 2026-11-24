@@ -1,11 +1,9 @@
 // app/p/[slug]/page.tsx
 import { notFound } from 'next/navigation';
-import { Render } from '@puckeditor/core/rsc';
-import type { Data } from '@puckeditor/core';
-import { puckConfig, type ArchivePuckProps } from '@/lib/puck/puck.config';
 import { archiveRepository } from '@/lib/storage/repository';
 import { verifyAdminSession } from '@/lib/dal/auth';
 import ZinePageChrome from '@/components/puck/ZinePageChrome';
+import PuckStaticRenderer from '@/components/puck/PuckStaticRenderer';
 
 export const dynamic = 'force-dynamic';
 
@@ -39,10 +37,7 @@ export default async function CustomPuckZinePage({
       defaultContrast={payload.siteSettings.defaultContrast}
       isAdminAuthenticated={isAdminAuthenticated}
     >
-      <Render
-        config={puckConfig}
-        data={page.puckData as unknown as Data<ArchivePuckProps>}
-      />
+      <PuckStaticRenderer data={page.puckData} />
     </ZinePageChrome>
   );
 }

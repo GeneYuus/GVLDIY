@@ -41,6 +41,7 @@ export interface LosslessAudioEngine {
   setProgressPct: React.Dispatch<React.SetStateAction<number>>;
   handleTogglePlay: () => void;
   selectTrack: (nextIdx: number, autoPlay?: boolean) => void;
+  cueTrackAtSeconds: (nextIdx: number, seconds?: number) => void;
   handleSwitchVersion: (vIdx: number) => void;
   seekToPct: (pct: number) => void;
   dismissMiniPlayer: () => void;
@@ -54,15 +55,41 @@ export function formatAudioSec(sec: number): string {
 }
 
 export function useLosslessAudioEngine(
-  tracks: FlacRecording[]
+  tracks: FlacRecording[],
+  initialCue?: { itemId?: string; timeSec?: number }
 ): [LosslessAudioEngine, React.RefObject<HTMLAudioElement | null>] {
   const primaryAudioRef = useRef<HTMLAudioElement | null>(null);
   const isDraggingRef = useRef(false);
 
-  const [trackIdx, setTrackIdx] = useState(0);
+  const resolvedInitialIdx = (() => {
+    if (!initialCue?.itemId) return 0;
+    const found = tracks.findIndex((t) => t.id === initialCue.itemId);
+    return found >= 0 ? found : 0;
+  })();
+
+  const resolvedInitialTrack = tracks[resolvedInitialIdx] || tracks[0] || null;
+  const resolvedInitialSec =
+    typeof initialCue?.timeSec === 'number' &&
+    Number.isFinite(initialCue.timeSec) &&
+    initialCue.timeSec > 0 &&
+    resolvedInitialTrack
+      ? Math.min(resolvedInitialTrack.durationSec, Math.floor(initialCue.timeSec))
+      : 0;
+  const resolvedInitialPct =
+    resolvedInitialTrack &&
+    resolvedInitialTrack.durationSec > 0 &&
+    resolvedInitialSec > 0
+      ? Math.min(100, (resolvedInitialSec / resolvedInitialTrack.durationSec) * 100)
+      : 0;
+
+  const pendingCueSecRef = useRef<number | null>(
+    resolvedInitialSec > 0 ? resolvedInitialSec : null
+  );
+
+  const [trackIdx, setTrackIdx] = useState(resolvedInitialIdx);
   const [activeVersionIdx, setActiveVersionIdx] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [progressPct, setProgressPct] = useState(0);
+  const [progressPct, setProgressPct] = useState(resolvedInitialPct);
   const [volume, setVolume] = useState(85);
   const [muted, setMuted] = useState(false);
   const [qualityMode, setQualityMode] = useState<'lossless' | 'aac'>('lossless');
@@ -145,10 +172,35 @@ export function useLosslessAudioEngine(
     };
   }, []);
 
+  const applyPendingCueIfAny = (el: HTMLAudioElement) => {
+    const targetSec = pendingCueSecRef.current;
+    if (targetSec === null) return;
+    const seekNow = () => {
+      if (Number.isFinite(el.duration) && el.duration > 0) {
+        const ratio = currentTrack?.durationSec
+          ? Math.min(1, targetSec / currentTrack.durationSec)
+          : 0;
+        el.currentTime =
+          currentTrack && Math.abs(el.duration - currentTrack.durationSec) > 4
+            ? ratio * el.duration
+            : Math.min(el.duration, targetSec);
+      } else {
+        el.currentTime = targetSec;
+      }
+      pendingCueSecRef.current = null;
+    };
+    if (el.readyState >= 1) {
+      seekNow();
+    } else {
+      el.addEventListener('loadedmetadata', seekNow, { once: true });
+    }
+  };
+
   const playElement = async () => {
     const el = primaryAudioRef.current;
     if (!el) return;
     try {
+      applyPendingCueIfAny(el);
       await el.play();
       setIsPlaying(true);
       setHasActivatedSession(true);
@@ -174,6 +226,7 @@ export function useLosslessAudioEngine(
   const selectTrack = (nextIdx: number, autoPlay = true) => {
     if (tracks.length === 0) return;
     const normalized = (nextIdx + tracks.length) % tracks.length;
+    pendingCueSecRef.current = null;
     setTrackIdx(normalized);
     setActiveVersionIdx(0);
     setProgressPct(0);
@@ -191,6 +244,27 @@ export function useLosslessAudioEngine(
       primaryAudioRef.current?.pause();
       setIsPlaying(false);
     }
+  };
+
+  const cueTrackAtSeconds = (nextIdx: number, seconds = 0) => {
+    if (tracks.length === 0) return;
+    const normalized = (nextIdx + tracks.length) % tracks.length;
+    const targetTrack = tracks[normalized];
+    const safeSec =
+      targetTrack && seconds > 0
+        ? Math.min(targetTrack.durationSec, Math.floor(seconds))
+        : 0;
+    const pct =
+      targetTrack && targetTrack.durationSec > 0 && safeSec > 0
+        ? Math.min(100, (safeSec / targetTrack.durationSec) * 100)
+        : 0;
+
+    pendingCueSecRef.current = safeSec > 0 ? safeSec : null;
+    primaryAudioRef.current?.pause();
+    setIsPlaying(false);
+    setTrackIdx(normalized);
+    setActiveVersionIdx(0);
+    setProgressPct(pct);
   };
 
   const handleSwitchVersion = (vIdx: number) => {
@@ -232,9 +306,14 @@ export function useLosslessAudioEngine(
     const clamped = Math.max(0, Math.min(100, pct));
     setProgressPct(clamped);
     setHasActivatedSession(true);
+    pendingCueSecRef.current = null;
     const el = primaryAudioRef.current;
     if (el && Number.isFinite(el.duration) && el.duration > 0) {
       el.currentTime = (clamped / 100) * el.duration;
+    } else if (currentTrack && currentTrack.durationSec > 0) {
+      pendingCueSecRef.current = Math.floor(
+        (clamped / 100) * currentTrack.durationSec
+      );
     }
   };
 
@@ -284,6 +363,7 @@ export function useLosslessAudioEngine(
       setProgressPct,
       handleTogglePlay,
       selectTrack,
+      cueTrackAtSeconds,
       handleSwitchVersion,
       seekToPct,
       dismissMiniPlayer,

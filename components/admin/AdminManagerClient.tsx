@@ -54,6 +54,7 @@ interface AdminManagerClientProps {
     storageDriver: 'hostinger-mysql' | 'preview-memory';
     runtimePosture?: RuntimePostureSnapshot;
     auditLogs?: AuditLogEntry[];
+    auditTotal?: number;
   };
   onLocked?: () => void;
 }
@@ -81,12 +82,24 @@ export default function AdminManagerClient({ initialData, onLocked }: AdminManag
   const [subscribers, setSubscribers] = useState<SubscriberCsvRow[]>(initialData.subscribers);
   const [futureTasks, setFutureTasks] = useState<FutureTaskLedgerItem[]>(initialData.futureTasks);
   const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>(initialData.auditLogs || []);
+  const [auditTotal, setAuditTotal] = useState<number>(
+    typeof initialData.auditTotal === 'number'
+      ? initialData.auditTotal
+      : (initialData.auditLogs || []).length
+  );
   const [newZineTitle, setNewZineTitle] = useState('');
   const [newZineSlug, setNewZineSlug] = useState('');
 
   const showToast = (msg: string) => setToastMsg(msg);
-  const syncAuditLogs = (maybeLogs?: unknown) => {
-    if (Array.isArray(maybeLogs)) setAuditLogs(maybeLogs as AuditLogEntry[]);
+  const syncAuditLogs = (maybeLogs?: unknown, maybeTotal?: unknown) => {
+    if (Array.isArray(maybeLogs)) {
+      setAuditLogs(maybeLogs as AuditLogEntry[]);
+      if (typeof maybeTotal === 'number') {
+        setAuditTotal(maybeTotal);
+      } else {
+        setAuditTotal((prev) => Math.max(prev, maybeLogs.length));
+      }
+    }
   };
 
   useEffect(() => {
@@ -211,7 +224,7 @@ export default function AdminManagerClient({ initialData, onLocked }: AdminManag
           </span>
         </div>
         <div className="top-bar-actions">
-          <Link href="/" className="typo-action"><ArrowLeft className="w-3.5 h-3.5" /><span>Archive</span></Link>
+          <Link href="/" prefetch={false} className="typo-action"><ArrowLeft className="w-3.5 h-3.5" /><span>Archive</span></Link>
           <span className="text-[var(--mute)] font-mono text-xs" aria-hidden="true">·</span>
           <button type="button" onClick={handleLogout} className="typo-action"><Lock className="w-3.5 h-3.5" /><span>Lock Session</span></button>
         </div>
@@ -251,7 +264,7 @@ export default function AdminManagerClient({ initialData, onLocked }: AdminManag
                         </div>
                       </div>
                       <div className="flex items-center justify-between gap-2 pt-2 border-t border-[var(--grid-hairline)]">
-                        <Link href={`/admin/editor/${encodeURIComponent(slot.slug)}`} className="typo-action typo-action-accent">
+                        <Link href={`/admin/editor/${encodeURIComponent(slot.slug)}`} prefetch={false} className="typo-action typo-action-accent">
                           <span>Open in Puck</span><ArrowUpRight className="w-3.5 h-3.5" />
                         </Link>
                         {count > 0 && (
@@ -321,11 +334,11 @@ export default function AdminManagerClient({ initialData, onLocked }: AdminManag
                         <td className="font-mono text-xs tabular-nums">{p.puckData?.content?.length || 0}</td>
                         <td>
                           <div className="inline-flex flex-wrap items-center gap-3">
-                            <Link href={`/admin/editor/${encodeURIComponent(p.slug)}`} className="typo-action typo-action-accent">
+                            <Link href={`/admin/editor/${encodeURIComponent(p.slug)}`} prefetch={false} className="typo-action typo-action-accent">
                               <span>Edit in Puck</span><ArrowUpRight className="w-3 h-3" />
                             </Link>
                             <span className="text-[var(--mute)]" aria-hidden="true">·</span>
-                            <Link href={`/p/${p.slug}`} target="_blank" rel="noopener noreferrer" className="typo-action">
+                            <Link href={`/p/${p.slug}`} prefetch={false} target="_blank" rel="noopener noreferrer" className="typo-action">
                               <span>View</span><ArrowUpRight className="w-3 h-3" />
                             </Link>
                             <span className="text-[var(--mute)]" aria-hidden="true">·</span>
@@ -473,7 +486,23 @@ export default function AdminManagerClient({ initialData, onLocked }: AdminManag
         )}
 
         {(activeTab === 'csv' || activeTab === 'ledger') && (
-          <SubscribersSecurityPanel mode={activeTab} storageDriver={initialData.storageDriver} runtimePosture={initialData.runtimePosture} subscribers={subscribers} setSubscribers={setSubscribers} futureTasks={futureTasks} setFutureTasks={setFutureTasks} auditLogs={auditLogs} setAuditLogs={setAuditLogs} postAdminAction={postAdminAction} syncAuditLogs={syncAuditLogs} showToast={showToast} onLocked={onLocked} />
+          <SubscribersSecurityPanel
+            mode={activeTab}
+            storageDriver={initialData.storageDriver}
+            runtimePosture={initialData.runtimePosture}
+            subscribers={subscribers}
+            setSubscribers={setSubscribers}
+            futureTasks={futureTasks}
+            setFutureTasks={setFutureTasks}
+            auditLogs={auditLogs}
+            setAuditLogs={setAuditLogs}
+            auditTotal={auditTotal}
+            setAuditTotal={setAuditTotal}
+            postAdminAction={postAdminAction}
+            syncAuditLogs={syncAuditLogs}
+            showToast={showToast}
+            onLocked={onLocked}
+          />
         )}
       </main>
 

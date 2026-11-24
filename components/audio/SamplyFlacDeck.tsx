@@ -48,6 +48,13 @@ interface SamplyFlacDeckProps {
     author: string,
     text: string
   ) => Promise<void>;
+  onCopyShareLink?: (params: {
+    tab: 'audio';
+    item: string;
+    t?: number;
+    key: string;
+  }) => void;
+  copiedLinkKey?: string | null;
 }
 
 export default function SamplyFlacDeck({
@@ -60,6 +67,8 @@ export default function SamplyFlacDeck({
   onAddComment,
   onVoteComment,
   onReplyComment,
+  onCopyShareLink,
+  copiedLinkKey,
 }: SamplyFlacDeckProps) {
   const {
     currentTrack,
@@ -205,7 +214,7 @@ export default function SamplyFlacDeck({
                   ? ` · ${currentTrack.loudnessLufs} LUFS`
                   : ''}
               </div>
-              <h3 className="mt-1 mb-0 text-sm sm:text-lg font-bold tracking-tight line-clamp-2 sm:truncate">
+              <h3 className="plate-title mt-1 mb-0 text-sm sm:text-lg line-clamp-2 sm:truncate">
                 {currentTrack.title}
               </h3>
             </div>
@@ -246,20 +255,42 @@ export default function SamplyFlacDeck({
               <span className="sm:hidden" />
             )}
 
-            <div className="relative shrink-0" ref={optionsWrapRef}>
-              <button
-                type="button"
-                aria-pressed={optionsOpen}
-                className={`typo-action min-h-[44px] px-1.5 ${
-                  optionsOpen ? 'active' : ''
-                }`}
-                onClick={() => setOptionsOpen((o) => !o)}
-                aria-label="Audio stream settings"
-                title="Stream quality & loudness match"
-              >
-                <SlidersHorizontal className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Stream</span>
-              </button>
+            <div className="inline-flex items-center gap-2 shrink-0">
+              {onCopyShareLink && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    onCopyShareLink({
+                      tab: 'audio',
+                      item: currentTrack.id,
+                      t: currentPlayheadSec > 0 ? currentPlayheadSec : undefined,
+                      key: `audio:${currentTrack.id}`,
+                    })
+                  }
+                  className={`btn-arch !py-1 !px-2.5 !text-[10.5px] font-mono tabular-nums whitespace-nowrap ${
+                    copiedLinkKey === `audio:${currentTrack.id}` ? 'active' : ''
+                  }`}
+                >
+                  {copiedLinkKey === `audio:${currentTrack.id}`
+                    ? '[ COPIED ]'
+                    : '[ COPY LINK ]'}
+                </button>
+              )}
+
+              <div className="relative shrink-0" ref={optionsWrapRef}>
+                <button
+                  type="button"
+                  aria-pressed={optionsOpen}
+                  className={`typo-action min-h-[44px] px-1.5 ${
+                    optionsOpen ? 'active' : ''
+                  }`}
+                  onClick={() => setOptionsOpen((o) => !o)}
+                  aria-label="Audio stream settings"
+                  title="Stream quality & loudness match"
+                >
+                  <SlidersHorizontal className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Stream</span>
+                </button>
 
               {optionsOpen && (
                 <div className="glass-popover absolute right-0 top-full mt-2 w-[min(240px,calc(100vw-36px))] p-3 z-30 flex flex-col gap-2 text-xs">
@@ -320,6 +351,7 @@ export default function SamplyFlacDeck({
                   )}
                 </div>
               )}
+              </div>
             </div>
           </div>
         </div>

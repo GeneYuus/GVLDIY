@@ -58,7 +58,7 @@ export default function DockedLosslessMiniPlayer({
 
           <div className="min-w-0 flex-1">
             <div className="flex items-center justify-between gap-2 min-w-0">
-              <div className="text-xs font-semibold text-[var(--ink)] truncate">
+              <div className="plate-title text-xs text-[var(--ink)] truncate">
                 {track.title}
               </div>
               <span className="font-mono text-[10px] text-[var(--mute)] tabular-nums shrink-0">

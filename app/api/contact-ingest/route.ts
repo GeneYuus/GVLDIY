@@ -9,11 +9,12 @@ import { archiveRepository } from '@/lib/storage/repository';
 
 export async function POST(req: NextRequest) {
   const ipHash = extractClientIpHash(req);
-  const rateCheck = checkPublicWriteRateLimit(ipHash, 'contact-ingest', 6);
+  const maxPerMin = process.env.NODE_ENV !== 'production' ? 20 : 10;
+  const rateCheck = checkPublicWriteRateLimit(ipHash, 'contact-ingest', maxPerMin);
   if (!rateCheck.allowed) {
     return NextResponse.json(
       {
-        error: `Rate limit reached (max 6 submissions/min). Retry in ${rateCheck.retryAfterSec}s.`,
+        error: `Please wait ${rateCheck.retryAfterSec}s before sending another message.`,
       },
       {
         status: 429,

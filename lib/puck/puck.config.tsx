@@ -152,7 +152,7 @@ export const puckConfig: Config<ArchivePuckProps> = {
                   {eyebrow}
                 </div>
               )}
-              <h3 className="m-0 text-base sm:text-lg font-bold tracking-tight text-balance">
+              <h3 className="plate-title m-0 text-base sm:text-lg text-balance">
                 {headline}
               </h3>
               {description && (
@@ -278,7 +278,7 @@ export const puckConfig: Config<ArchivePuckProps> = {
                     {kicker}
                   </div>
                 )}
-                <h3 className="m-0 text-base font-bold tracking-tight">
+                <h3 className="plate-title m-0 text-base">
                   {heading}
                 </h3>
                 {body && (
@@ -330,7 +330,7 @@ export const puckConfig: Config<ArchivePuckProps> = {
             <div className="font-mono text-xs opacity-80 tabular-nums mb-1.5">
               {headerMeta}
             </div>
-            <h3 className="m-0 text-lg sm:text-xl font-bold tracking-tight text-balance">
+            <h3 className="flyer-title m-0 text-lg sm:text-xl text-balance">
               {lineupTitle}
             </h3>
             <div className="font-mono text-xs font-semibold mt-1 opacity-90">
@@ -404,7 +404,7 @@ export const puckConfig: Config<ArchivePuckProps> = {
               <div className="font-mono text-xs text-[var(--mute)] tabular-nums">
                 {activeYears} · {neighborhood}
               </div>
-              <h3 className="m-0 text-lg font-bold tracking-tight">
+              <h3 className="plate-title m-0 text-lg">
                 {spotName}
               </h3>
               <p className="m-0 text-sm text-[var(--ink-2)] leading-relaxed">
@@ -477,8 +477,8 @@ export const puckConfig: Config<ArchivePuckProps> = {
     color: #f4f1e8;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
-  .kicker { color: #ff5900; font-size: 11px; font-weight: 700; letter-spacing: 0.06em; }
-  h2 { margin: 6px 0 8px; font-size: 18px; letter-spacing: -0.02em; }
+  .kicker { color: #ff5900; font-size: 11px; font-weight: 700; letter-spacing: 0.075em; text-transform: uppercase; }
+  h2 { margin: 6px 0 8px; font-size: 18px; letter-spacing: 0.035em; text-transform: uppercase; }
   p { margin: 0; font-size: 13px; line-height: 1.5; color: #cbd5e1; }
 </style>
 </head>

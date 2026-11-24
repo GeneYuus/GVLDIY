@@ -1,6 +1,7 @@
 // app/admin/page.tsx
 import {
   checkProductionAuthPosture,
+  getAdminMfaStatus,
   isPreviewDemoModeEnabled,
   verifyAdminSession,
 } from '@/lib/dal/auth';
@@ -29,13 +30,23 @@ export default async function AdminManagerPage() {
   const authenticated = await verifyAdminSession();
 
   if (authenticated) {
-    const adminPayload = await archiveRepository.getAdminFullPayload();
+    const [adminPayload, mfaStatus] = await Promise.all([
+      archiveRepository.getAdminFullPayload(),
+      getAdminMfaStatus(),
+    ]);
+    const enrichedPayload = {
+      ...adminPayload,
+      runtimePosture: {
+        ...adminPayload.runtimePosture,
+        mfaStatus,
+      },
+    };
     return (
       <AdminSessionGate
-        initialAdminData={adminPayload}
+        initialAdminData={enrichedPayload}
         demoModeAvailable={demoModeAvailable}
-        seasonTheme={adminPayload.siteSettings.seasonTheme}
-        defaultContrast={adminPayload.siteSettings.defaultContrast}
+        seasonTheme={enrichedPayload.siteSettings.seasonTheme}
+        defaultContrast={enrichedPayload.siteSettings.defaultContrast}
       />
     );
   }

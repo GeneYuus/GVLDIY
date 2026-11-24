@@ -258,6 +258,21 @@ const DDL_TABLES: string[] = [
     details_json JSON NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS admin_mfa_config (
+    id TINYINT PRIMARY KEY DEFAULT 1,
+    enabled TINYINT(1) NOT NULL DEFAULT 0,
+    encrypted_secret TEXT NULL,
+    pending_encrypted_secret TEXT NULL,
+    last_accepted_step BIGINT NULL,
+    recovery_hashes_json TEXT NULL,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS comment_votes (
+    comment_id VARCHAR(64) NOT NULL,
+    ip_hash CHAR(64) NOT NULL,
+    created_at_iso VARCHAR(40) NOT NULL,
+    PRIMARY KEY (comment_id, ip_hash)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 ];
 
 // Static allowlisted column migrations checked via INFORMATION_SCHEMA.COLUMNS
@@ -467,14 +482,17 @@ async function hydrateRelationalTablesOnce(
     }
   }
 
-  // Sync completed roadmap ledger items IT-01 through IT-05 in future_tasks
+  // Sync roadmap ledger items IT-01 through IT-05 and IT-07 through IT-09 in future_tasks
   for (const seedTask of initialSeed.futureTasks) {
     if (
       seedTask.id === 'IT-01' ||
       seedTask.id === 'IT-02' ||
       seedTask.id === 'IT-03' ||
       seedTask.id === 'IT-04' ||
-      seedTask.id === 'IT-05'
+      seedTask.id === 'IT-05' ||
+      seedTask.id === 'IT-07' ||
+      seedTask.id === 'IT-08' ||
+      seedTask.id === 'IT-09'
     ) {
       await pool.query(
         `INSERT INTO future_tasks
@@ -501,6 +519,16 @@ async function hydrateRelationalTablesOnce(
         ]
       );
     }
+  }
+
+  // Upgrade legacy repeated base64 porthole plates on ERA-01..ERA-07 to distinct archival era photos (without touching custom curator URLs)
+  for (const seedEra of initialSeed.timeline) {
+    await pool.query(
+      `UPDATE timeline_eras
+       SET porthole_image_url = ?
+       WHERE id = ? AND porthole_image_url LIKE 'data:image/jpeg;base64,%'`,
+      [seedEra.portholeImageUrl, seedEra.id]
+    );
   }
 }
 
@@ -1959,16 +1987,77 @@ export async function insertAuditLogSql(
   );
 }
 
+const AUTH_SECURITY_ACTIONS = [
+  'totp_enrolled',
+  'totp_verified',
+  'totp_replay_blocked',
+  'recovery_code_used',
+  'totp_disabled',
+  'TOTP_FAILED',
+  'LOGIN_PASSKEY_OK',
+  'LOGIN_DEMO_OK',
+  'LOGIN_FAILED',
+  'LOGIN_DEMO_BLOCKED',
+  'LOCKOUT_TRIGGERED',
+  'GLOBAL_BURST_THROTTLED',
+  'SESSION_REVOKED',
+  'REVOKE_ALL_SESSIONS',
+  'HASH_GENERATED',
+] as const;
+
+function buildAuditFilterClause(actionFilter?: string): {
+  whereSql: string;
+  params: unknown[];
+} {
+  const clean = String(actionFilter || 'all').trim();
+  if (!clean || clean === 'all') {
+    return { whereSql: '', params: [] };
+  }
+  if (clean === 'auth_security') {
+    const placeholders = AUTH_SECURITY_ACTIONS.map(() => '?').join(', ');
+    return {
+      whereSql: `WHERE action_name IN (${placeholders})`,
+      params: [...AUTH_SECURITY_ACTIONS],
+    };
+  }
+  if (/^[A-Za-z0-9_:-]{1,64}$/.test(clean)) {
+    return {
+      whereSql: 'WHERE action_name = ?',
+      params: [clean],
+    };
+  }
+  return { whereSql: '', params: [] };
+}
+
+export async function countAuditLogsSql(
+  pool: Pool,
+  actionFilter?: string
+): Promise<number> {
+  const { whereSql, params } = buildAuditFilterClause(actionFilter);
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT COUNT(*) AS cnt FROM audit_logs ${whereSql}`,
+    params
+  );
+  return Number(rows?.[0]?.cnt || 0);
+}
+
 export async function listAuditLogsSql(
   pool: Pool,
-  limit: number
+  limit: number,
+  offset = 0,
+  actionFilter?: string
 ): Promise<AuditLogEntry[]> {
+  const safeLimit = Math.max(1, Math.min(5000, Math.floor(limit)));
+  const safeOffset = Math.max(0, Math.floor(offset));
+  const { whereSql, params } = buildAuditFilterClause(actionFilter);
+
   const [rows] = await pool.query<RowDataPacket[]>(
     `SELECT id, created_at_iso, curator_username, action_name, target_id, created_at
      FROM audit_logs
+     ${whereSql}
      ORDER BY id DESC
-     LIMIT ?`,
-    [limit]
+     LIMIT ? OFFSET ?`,
+    [...params, safeLimit, safeOffset]
   );
   return rows.map((r) => ({
     id: String(r.id),
@@ -1981,4 +2070,164 @@ export async function listAuditLogsSql(
       ? r.created_at.toISOString()
       : String(r.created_at || new Date().toISOString()),
   }));
+}
+
+// Relational Comment Vote Deduplication (Pass 10)
+export async function claimCommentVoteSql(
+  pool: Pool,
+  commentId: string,
+  ipHash: string
+): Promise<boolean> {
+  const cleanCommentId = String(commentId || '').trim().slice(0, 64);
+  const cleanIpHash = String(ipHash || '').trim().slice(0, 64);
+  if (!cleanCommentId || !cleanIpHash) return false;
+
+  const [res] = await pool.query(
+    `INSERT IGNORE INTO comment_votes (comment_id, ip_hash, created_at_iso)
+     VALUES (?, ?, ?)`,
+    [cleanCommentId, cleanIpHash, new Date().toISOString()]
+  );
+  return Number((res as { affectedRows?: number })?.affectedRows || 0) > 0;
+}
+
+// Admin MFA Configuration & Atomic Anti-Replay Lock (Pass 10)
+export interface AdminMfaRowRecord {
+  enabled: boolean;
+  encryptedSecret: string | null;
+  pendingEncryptedSecret: string | null;
+  lastAcceptedStep: number | null;
+  recoveryHashes: string[];
+  updatedAtIso: string | null;
+}
+
+export async function getAdminMfaConfigSql(
+  pool: Pool
+): Promise<AdminMfaRowRecord> {
+  await pool.query(
+    `INSERT IGNORE INTO admin_mfa_config (id, enabled) VALUES (1, 0)`
+  );
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT enabled, encrypted_secret, pending_encrypted_secret, last_accepted_step, recovery_hashes_json, updated_at
+     FROM admin_mfa_config
+     WHERE id = 1
+     LIMIT 1`
+  );
+  if (rows.length === 0) {
+    return {
+      enabled: false,
+      encryptedSecret: null,
+      pendingEncryptedSecret: null,
+      lastAcceptedStep: null,
+      recoveryHashes: [],
+      updatedAtIso: null,
+    };
+  }
+  const r = rows[0]!;
+  let recoveryHashes: string[] = [];
+  if (r.recovery_hashes_json) {
+    try {
+      const parsed = JSON.parse(String(r.recovery_hashes_json));
+      if (Array.isArray(parsed)) {
+        recoveryHashes = parsed.map((h) => String(h || '')).filter(Boolean);
+      }
+    } catch {
+      recoveryHashes = [];
+    }
+  }
+  return {
+    enabled: Boolean(r.enabled),
+    encryptedSecret: r.encrypted_secret ? String(r.encrypted_secret) : null,
+    pendingEncryptedSecret: r.pending_encrypted_secret
+      ? String(r.pending_encrypted_secret)
+      : null,
+    lastAcceptedStep:
+      r.last_accepted_step !== null && r.last_accepted_step !== undefined
+        ? Number(r.last_accepted_step)
+        : null,
+    recoveryHashes,
+    updatedAtIso:
+      r.updated_at instanceof Date
+        ? r.updated_at.toISOString()
+        : r.updated_at
+        ? String(r.updated_at)
+        : null,
+  };
+}
+
+export async function savePendingMfaSecretSql(
+  pool: Pool,
+  pendingEncryptedSecret: string
+): Promise<void> {
+  await pool.query(
+    `INSERT INTO admin_mfa_config (id, enabled, pending_encrypted_secret)
+     VALUES (1, 0, ?)
+     ON DUPLICATE KEY UPDATE
+       pending_encrypted_secret = VALUES(pending_encrypted_secret)`,
+    [pendingEncryptedSecret]
+  );
+}
+
+export async function promotePendingMfaSecretSql(
+  pool: Pool,
+  encryptedSecret: string,
+  matchedStep: number,
+  recoveryHashes: string[]
+): Promise<void> {
+  await pool.query(
+    `INSERT INTO admin_mfa_config
+       (id, enabled, encrypted_secret, pending_encrypted_secret, last_accepted_step, recovery_hashes_json)
+     VALUES (1, 1, ?, NULL, ?, ?)
+     ON DUPLICATE KEY UPDATE
+       enabled = 1,
+       encrypted_secret = VALUES(encrypted_secret),
+       pending_encrypted_secret = NULL,
+       last_accepted_step = VALUES(last_accepted_step),
+       recovery_hashes_json = VALUES(recovery_hashes_json)`,
+    [encryptedSecret, matchedStep, JSON.stringify(recoveryHashes)]
+  );
+}
+
+/**
+ * Atomically claims a TOTP 30-second step only if matchedStep > last_accepted_step.
+ * Returns false if the code was already used (anti-replay lock).
+ */
+export async function claimTotpStepAtomicSql(
+  pool: Pool,
+  matchedStep: number
+): Promise<boolean> {
+  await pool.query(
+    `INSERT IGNORE INTO admin_mfa_config (id, enabled) VALUES (1, 0)`
+  );
+  const [res] = await pool.query(
+    `UPDATE admin_mfa_config
+     SET last_accepted_step = ?
+     WHERE id = 1 AND (last_accepted_step IS NULL OR last_accepted_step < ?)`,
+    [matchedStep, matchedStep]
+  );
+  return Number((res as { affectedRows?: number })?.affectedRows || 0) === 1;
+}
+
+export async function updateRecoveryHashesSql(
+  pool: Pool,
+  recoveryHashes: string[]
+): Promise<void> {
+  await pool.query(
+    `UPDATE admin_mfa_config
+     SET recovery_hashes_json = ?
+     WHERE id = 1`,
+    [JSON.stringify(recoveryHashes)]
+  );
+}
+
+export async function disableAdminMfaSql(pool: Pool): Promise<void> {
+  await pool.query(
+    `INSERT INTO admin_mfa_config
+       (id, enabled, encrypted_secret, pending_encrypted_secret, recovery_hashes_json)
+     VALUES (1, 0, NULL, NULL, NULL)
+     ON DUPLICATE KEY UPDATE
+       enabled = 0,
+       encrypted_secret = NULL,
+       pending_encrypted_secret = NULL,
+       recovery_hashes_json = NULL`
+  );
 }

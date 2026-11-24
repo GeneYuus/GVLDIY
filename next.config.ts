@@ -23,6 +23,7 @@ export default function createNextConfig(phase: string): NextConfig {
 
   return {
     distDir: isDevServer ? '.next-dev' : '.next',
+    output: isDevServer ? undefined : 'standalone',
     reactStrictMode: true,
     productionBrowserSourceMaps: false,
     eslint: {
@@ -62,7 +63,68 @@ export default function createNextConfig(phase: string): NextConfig {
       ],
     },
     async headers() {
+      const staticCacheRules = isDevServer
+        ? [
+            {
+              source: '/_next/static/media/:path*',
+              headers: [
+                {
+                  key: 'Cache-Control',
+                  value: 'public, max-age=31536000, immutable',
+                },
+              ],
+            },
+            {
+              source: '/_next/static/chunks/:path*',
+              headers: [
+                {
+                  key: 'Cache-Control',
+                  value: 'no-cache, no-store, must-revalidate',
+                },
+              ],
+            },
+            {
+              source: '/_next/static/css/:path*',
+              headers: [
+                {
+                  key: 'Cache-Control',
+                  value: 'no-cache, no-store, must-revalidate',
+                },
+              ],
+            },
+            {
+              source: '/assets/:path*',
+              headers: [
+                {
+                  key: 'Cache-Control',
+                  value: 'public, max-age=86400',
+                },
+              ],
+            },
+          ]
+        : [
+            {
+              source: '/_next/static/:path*',
+              headers: [
+                {
+                  key: 'Cache-Control',
+                  value: 'public, max-age=31536000, immutable',
+                },
+              ],
+            },
+            {
+              source: '/assets/:path*',
+              headers: [
+                {
+                  key: 'Cache-Control',
+                  value: 'public, max-age=31536000, immutable',
+                },
+              ],
+            },
+          ];
+
       const rules = [
+        ...staticCacheRules,
         {
           source: '/:path*',
           headers: [
@@ -106,7 +168,6 @@ export default function createNextConfig(phase: string): NextConfig {
 
       return rules;
     },
-    output: isDevServer ? undefined : 'standalone',
     transpilePackages: ['motion'],
     webpack: (config, { dev }) => {
       // Disable multi-hundred-MB persistent webpack packfiles on tmpfs RAM disk

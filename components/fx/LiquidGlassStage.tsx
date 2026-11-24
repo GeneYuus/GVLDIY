@@ -76,22 +76,32 @@ export default function LiquidGlassStage({
     sheenOpacity.set(0.55);
   };
 
+  const resolvedRadiusStyle =
+    typeof radius === 'number' ? { borderRadius: `${radius}px` } : undefined;
+
   return (
-    <LiquidGlass
-      variant={variant}
-      radius={radius}
-      bezel={bezel}
-      thickness={thickness}
-      blur={blur}
-      saturation={saturation}
-      specular={specular}
-      dispersion={dispersion}
-      lightAngle={lightAngle}
+    <div
       aria-label={ariaLabel}
       onPointerMove={handlePointerMove}
       onPointerLeave={handlePointerLeave}
-      className={`liquid-stage-shell ${className}`.trim()}
+      style={resolvedRadiusStyle}
+      className={`liquid-stage-shell relative ${className}`.trim()}
     >
+      <LiquidGlass
+        variant={variant}
+        radius={radius}
+        bezel={bezel}
+        thickness={thickness}
+        blur={blur}
+        saturation={saturation}
+        specular={specular}
+        dispersion={dispersion}
+        lightAngle={lightAngle}
+        aria-hidden="true"
+        className="liquid-stage-backdrop"
+      >
+        {null}
+      </LiquidGlass>
       <motion.div
         aria-hidden="true"
         className="liquid-stage-sheen"
@@ -107,6 +117,6 @@ export default function LiquidGlassStage({
       <div className={`relative z-10 w-full min-w-0 ${contentClassName}`.trim()}>
         {children}
       </div>
-    </LiquidGlass>
+    </div>
   );
 }

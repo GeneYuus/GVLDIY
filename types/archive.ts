@@ -234,6 +234,9 @@ export interface FutureTaskLedgerItem {
     | 'Pass 6'
     | 'Pass 7'
     | 'Pass 8'
+    | 'Pass 9'
+    | 'Pass 10'
+    | 'Pass 11'
     | 'Hostinger'
     | 'Storage / CDN';
   title: string;
@@ -251,6 +254,24 @@ export interface FutureTaskLedgerItem {
   createdAtIso: string;
 }
 
+export interface AdminMfaStatusSnapshot {
+  active: boolean;
+  dbEnabled: boolean;
+  envFallbackConfigured: boolean;
+  source: 'database' | 'env-fallback' | 'none';
+  hasPendingSetup: boolean;
+  remainingRecoveryCodes: number;
+  updatedAtIso: string | null;
+}
+
+export interface AuditLogPageResult {
+  logs: AuditLogEntry[];
+  total: number;
+  page: number;
+  pageSize: number;
+  filter: string;
+}
+
 export interface RuntimePostureSnapshot {
   mode: 'preview-demo' | 'hostinger-production';
   activePort: string;
@@ -264,6 +285,7 @@ export interface RuntimePostureSnapshot {
   driveProxyConfigured: boolean;
   r2PublicDomain: string;
   igWebhookConfigured: boolean;
+  mfaStatus?: AdminMfaStatusSnapshot;
 }
 
 export interface ArchiveDataset {

@@ -63,7 +63,7 @@ export default function ZinePageChrome({
     <div className="min-h-screen flex flex-col">
       <header className="masthead">
         <div className="brand-wrap min-w-0">
-          <Link href="/" className="typo-action shrink-0" aria-label="Back to Archive">
+          <Link href="/" prefetch={false} className="typo-action shrink-0" aria-label="Back to Archive">
             <ArrowLeft className="w-3.5 h-3.5" />
             <span className="hidden sm:inline">Archive</span>
           </Link>
@@ -78,6 +78,7 @@ export default function ZinePageChrome({
           {canEdit && (
             <Link
               href={`/admin/editor/${encodeURIComponent(slug)}`}
+              prefetch={false}
               className="typo-action typo-action-accent"
             >
               <span>Edit in Puck</span>

@@ -12,6 +12,16 @@ import {
 interface MonthFlyerCalendarProps {
   events: ShowCalendarEvent[];
   submissionEmail: string;
+  initialMonthKey?: string;
+  initialEventId?: string;
+  onSelectionChange?: (monthKey: string, eventId: string | null) => void;
+  onCopyShareLink?: (params: {
+    tab: 'calendar';
+    month: string;
+    item: string;
+    key: string;
+  }) => void;
+  copiedLinkKey?: string | null;
 }
 
 const SHORT_MONTHS = [
@@ -84,6 +94,11 @@ function computeMonthMeta(monthKey: string): {
 export default function MonthFlyerCalendar({
   events,
   submissionEmail,
+  initialMonthKey,
+  initialEventId,
+  onSelectionChange,
+  onCopyShareLink,
+  copiedLinkKey,
 }: MonthFlyerCalendarProps) {
   const scheduledMonths = useMemo(() => {
     const set = new Set<string>();
@@ -95,20 +110,33 @@ export default function MonthFlyerCalendar({
     return Array.from(set).sort();
   }, [events]);
 
-  const initialMonth = scheduledMonths[0] || '2026-11';
-  const [calMonth, setCalMonth] = useState<string>(initialMonth);
-  const activeMonth = isValidMonthKey(calMonth) ? calMonth : initialMonth;
+  const deepLinkedEvent = initialEventId
+    ? events.find((e) => e.id === initialEventId)
+    : undefined;
+
+  const fallbackMonth = scheduledMonths[0] || '2026-11';
+  const resolvedInitialMonth =
+    (deepLinkedEvent && isValidMonthKey(deepLinkedEvent.monthKey)
+      ? deepLinkedEvent.monthKey
+      : undefined) ||
+    (initialMonthKey && isValidMonthKey(initialMonthKey)
+      ? initialMonthKey
+      : undefined) ||
+    fallbackMonth;
+
+  const [calMonth, setCalMonth] = useState<string>(resolvedInitialMonth);
+  const activeMonth = isValidMonthKey(calMonth) ? calMonth : fallbackMonth;
 
   const monthEvents = useMemo(
     () =>
       events
         .filter((e) => e.monthKey === activeMonth)
-        .sort((a, b) => a.dayOfMonth - b.dayOfMonth),
+        .sort((a, b) => a.dayOfMonth - b.dayOfMonth || a.id.localeCompare(b.id)),
     [events, activeMonth]
   );
 
   const [selectedEventId, setSelectedEventId] = useState<string | null>(
-    monthEvents[0]?.id || null
+    deepLinkedEvent?.id || monthEvents[0]?.id || null
   );
 
   const { longLabel, daysInMonth, startOffset } = computeMonthMeta(activeMonth);
@@ -116,13 +144,42 @@ export default function MonthFlyerCalendar({
   const activeShow =
     monthEvents.find((e) => e.id === selectedEventId) || monthEvents[0] || null;
 
+  const selectedDayShows = useMemo(
+    () =>
+      activeShow
+        ? monthEvents.filter((e) => e.dayOfMonth === activeShow.dayOfMonth)
+        : [],
+    [monthEvents, activeShow]
+  );
+
   const handleSwitchMonth = (nextMonthKey: string) => {
     if (!isValidMonthKey(nextMonthKey)) return;
     setCalMonth(nextMonthKey);
     const matching = events
       .filter((e) => e.monthKey === nextMonthKey)
-      .sort((a, b) => a.dayOfMonth - b.dayOfMonth);
-    setSelectedEventId(matching[0]?.id || null);
+      .sort((a, b) => a.dayOfMonth - b.dayOfMonth || a.id.localeCompare(b.id));
+    const nextId = matching[0]?.id || null;
+    setSelectedEventId(nextId);
+    onSelectionChange?.(nextMonthKey, nextId);
+  };
+
+  const handleSelectDayCell = (dayShows: ShowCalendarEvent[]) => {
+    if (dayShows.length === 0) return;
+    if (dayShows.length === 1) {
+      const nextId = dayShows[0].id;
+      setSelectedEventId(nextId);
+      onSelectionChange?.(activeMonth, nextId);
+      return;
+    }
+    const currentIdx = activeShow
+      ? dayShows.findIndex((s) => s.id === activeShow.id)
+      : -1;
+    const nextId =
+      currentIdx === -1
+        ? dayShows[0].id
+        : dayShows[(currentIdx + 1) % dayShows.length].id;
+    setSelectedEventId(nextId);
+    onSelectionChange?.(activeMonth, nextId);
   };
 
   const flyerClass = activeShow
@@ -184,7 +241,7 @@ export default function MonthFlyerCalendar({
             <span>Prev</span>
           </button>
 
-          <span className="font-mono text-xs sm:text-sm font-bold text-[var(--ink-primary)] px-2 tabular-nums min-w-[132px] text-center">
+          <span className="font-mono text-xs sm:text-sm font-bold text-[var(--ink-primary)] px-2 tabular-nums min-w-[138px] text-center">
             {longLabel}
           </span>
 
@@ -201,7 +258,7 @@ export default function MonthFlyerCalendar({
 
         {scheduledMonths.length > 0 && (
           <div className="inline-flex flex-wrap items-center gap-2.5">
-            <span className="font-mono text-[11px] text-[var(--ink-mono)]">
+            <span className="font-mono text-[11px] uppercase tracking-[var(--tracking-kicker)] text-[var(--ink-mono)]">
               Scheduled:
             </span>
             {scheduledMonths.map((m, idx) => {
@@ -252,6 +309,8 @@ export default function MonthFlyerCalendar({
             const ev = dayShows[0];
             const isSel =
               activeShow && dayShows.some((s) => s.id === activeShow.id);
+            const selectedInCell =
+              (isSel && dayShows.find((s) => s.id === activeShow?.id)) || ev;
             return (
               <div
                 key={`day-${d}`}
@@ -259,15 +318,15 @@ export default function MonthFlyerCalendar({
                   isSel ? 'selected-day' : ''
                 }`}
                 onClick={() => {
-                  if (ev) setSelectedEventId(ev.id);
+                  if (dayShows.length > 0) handleSelectDayCell(dayShows);
                 }}
               >
                 <div className={ev ? 'font-bold' : 'font-normal'}>{d}</div>
-                {ev && (
+                {selectedInCell && (
                   <div className="show-pip">
                     {dayShows.length > 1
-                      ? `${ev.venue} +${dayShows.length - 1}`
-                      : ev.venue}
+                      ? `${selectedInCell.venue} +${dayShows.length - 1}`
+                      : selectedInCell.venue}
                   </div>
                 )}
               </div>
@@ -275,6 +334,41 @@ export default function MonthFlyerCalendar({
           })}
         </div>
       </div>
+
+      {/* 4px Mechanical Show Switcher Keys When 2+ Bills Share the Same Date */}
+      {activeShow && selectedDayShows.length > 1 && (
+        <div
+          className="mt-4 flex flex-wrap items-center gap-2"
+          role="group"
+          aria-label={`Shows scheduled on ${activeShow.isoDate}`}
+        >
+          <span className="font-mono text-[11px] uppercase tracking-[var(--tracking-kicker)] text-[var(--ink-mono)] tabular-nums mr-1">
+            {activeShow.isoDate} ({selectedDayShows.length} Shows):
+          </span>
+          {selectedDayShows.map((showItem, sIdx) => {
+            const isCurrentShow = showItem.id === activeShow.id;
+            return (
+              <button
+                key={showItem.id}
+                type="button"
+                aria-pressed={isCurrentShow}
+                onClick={() => {
+                  setSelectedEventId(showItem.id);
+                  onSelectionChange?.(activeMonth, showItem.id);
+                }}
+                className={`btn-arch tabular-nums ${
+                  isCurrentShow ? 'active' : ''
+                }`}
+              >
+                <span>
+                  {String(sIdx + 1).padStart(2, '0')} ·{' '}
+                  {showItem.venue.toUpperCase()}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       {activeShow ? (
         <div
@@ -285,11 +379,33 @@ export default function MonthFlyerCalendar({
           {sanitizedFlyerCss && safeShowScopeId && (
             <style>{`#${safeShowScopeId} { ${sanitizedFlyerCss} }`}</style>
           )}
-          <div className="flex flex-wrap justify-between gap-2 text-xs opacity-85 border-b border-dashed border-current pb-2 mb-3 tabular-nums">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs opacity-90 border-b border-dashed border-current pb-2.5 mb-3 tabular-nums">
             <span>{activeShow.isoDate}</span>
-            <span>{activeShow.doorsInfo}</span>
+            <div className="inline-flex flex-wrap items-center gap-2.5">
+              <span>{activeShow.doorsInfo}</span>
+              {onCopyShareLink && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    onCopyShareLink({
+                      tab: 'calendar',
+                      month: activeMonth,
+                      item: activeShow.id,
+                      key: `cal:${activeShow.id}`,
+                    })
+                  }
+                  className={`btn-arch !py-1 !px-2.5 !text-[10.5px] font-mono tabular-nums whitespace-nowrap ${
+                    copiedLinkKey === `cal:${activeShow.id}` ? 'active' : ''
+                  }`}
+                >
+                  {copiedLinkKey === `cal:${activeShow.id}`
+                    ? '[ COPIED ]'
+                    : '[ COPY LINK ]'}
+                </button>
+              )}
+            </div>
           </div>
-          <h3 className="m-0 mb-2 text-xl font-bold tracking-tight">
+          <h3 className="flyer-title mb-2 text-lg sm:text-xl">
             {activeShow.title}
           </h3>
           <div className="inline-flex items-center gap-1.5 text-sm font-semibold mb-2">

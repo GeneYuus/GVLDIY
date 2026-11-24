@@ -104,9 +104,20 @@
     0 1px 0 rgba(255, 255, 255, 0.88);
   --liquid-sheen-peak: rgba(255, 255, 255, 0.56);
 
-  --font-display: "Bricolage Grotesque", "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-sans: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Helvetica, Arial, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  /* Carved Bricolage Inktrap (90% wdth) Self-Hosted Font Families & Tracking Scale */
+  --font-display: "Bricolage Grotesque Variable", "Bricolage Grotesque", "Schibsted Grotesk Variable", sans-serif;
+  --font-sans: "Schibsted Grotesk Variable", "Schibsted Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "Azeret Mono Variable", "Azeret Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --wdth-display: 90;
+  --font-variation-display: "wdth" 90, "opsz" 42;
+  --font-variation-heading: "wdth" 92, "opsz" 24;
+
+  --tracking-brand: 0.055em;
+  --tracking-display: 0.035em;
+  --tracking-heading: 0.015em;
+  --tracking-body: 0.004em;
+  --tracking-kicker: 0.075em;
 }
 
 html[data-season="spring"] {
@@ -252,8 +263,30 @@ body {
   font-family: var(--font-sans);
   font-size: 14px;
   line-height: 1.5;
+  letter-spacing: var(--tracking-body);
   -webkit-font-smoothing: antialiased;
   overflow-x: hidden;
+}
+
+h1,
+h2 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-stretch: 90%;
+  font-variation-settings: var(--font-variation-display);
+  letter-spacing: var(--tracking-display);
+  line-height: 1.1;
+}
+
+h3,
+h4,
+.plate-title {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-stretch: 92%;
+  font-variation-settings: var(--font-variation-heading);
+  letter-spacing: var(--tracking-heading);
+  line-height: 1.18;
 }
 
 /* Diffused Seasonal Color Pools Above Raw Chalk / Carbon Ground */
@@ -334,6 +367,16 @@ html[data-contrast="dark"] .liquid-stage-shell {
     rgba(14, 19, 28, 0.32) 56%,
     var(--accent-whisper) 100%
   );
+}
+
+.liquid-stage-backdrop {
+  position: absolute !important;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: 0;
 }
 
 .liquid-stage-sheen {
@@ -461,7 +504,7 @@ html[data-contrast="dark"] .liquid-stage-shell {
   font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.04em;
+  letter-spacing: var(--tracking-kicker);
   text-transform: uppercase;
   font-variant-numeric: tabular-nums;
   background: transparent;
@@ -550,24 +593,38 @@ html[data-contrast="dark"] .liquid-stage-shell {
 }
 
 /* Unboxed Video Chapter Timestamp Rows */
-.chapter-trigger {
+.chapter-row {
   width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px solid var(--grid-hairline);
+  transition: border-color 0.14s ease;
+}
+
+.chapter-row:last-child {
+  border-bottom: none;
+}
+
+.chapter-row.active {
+  border-bottom-color: var(--accent);
+}
+
+.chapter-trigger {
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: baseline;
   gap: 10px;
   padding: 6.5px 4px;
   background: transparent;
   border: none;
-  border-bottom: 1px solid var(--grid-hairline);
   text-align: left;
   font-family: var(--font-mono);
   font-size: 11.5px;
   color: var(--ink-secondary);
-  transition: color 0.14s ease, border-color 0.14s ease;
-}
-
-.chapter-trigger:last-child {
-  border-bottom: none;
+  transition: color 0.14s ease;
 }
 
 .chapter-trigger:hover {
@@ -577,7 +634,6 @@ html[data-contrast="dark"] .liquid-stage-shell {
 .chapter-trigger.active {
   color: var(--ink-primary);
   font-weight: 700;
-  border-bottom-color: var(--accent);
 }
 
 .chapter-trigger.active .chapter-time {
@@ -633,7 +689,9 @@ html[data-contrast="dark"] .liquid-stage-shell {
   font-family: var(--font-mono);
   font-size: 10.5px;
   font-weight: 600;
-  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-kicker);
+  font-variant-numeric: tabular-nums;
   color: var(--ink-secondary);
   line-height: 1.25;
 }
@@ -753,10 +811,14 @@ html[data-contrast="dark"] .liquid-stage-shell {
 
 .brand-title {
   font-family: var(--font-display);
-  font-weight: 800;
-  font-size: 15.5px;
+  text-transform: uppercase;
+  font-weight: 700;
+  font-stretch: 90%;
+  font-variation-settings: var(--font-variation-display);
+  font-size: 15px;
+  line-height: 1.1;
   margin: 0;
-  letter-spacing: -0.03em;
+  letter-spacing: var(--tracking-brand);
 }
 
 .top-bar-actions {
@@ -794,7 +856,8 @@ html[data-contrast="dark"] .liquid-stage-shell {
   font-size: 10px;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: var(--tracking-kicker);
+  font-variant-numeric: tabular-nums;
   color: var(--ink-mono);
   padding: 0 16px 8px;
   border-bottom: 1px solid var(--grid-hairline);
@@ -886,21 +949,28 @@ html[data-contrast="dark"] .liquid-stage-shell {
   font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.05em;
+  letter-spacing: var(--tracking-kicker);
   text-transform: uppercase;
   font-variant-numeric: tabular-nums;
   color: var(--ink-mono);
   margin-bottom: 3px;
 }
 
-.sec-title {
+.sec-title,
+.flyer-title {
   font-family: var(--font-display);
-  font-size: clamp(1.38rem, 2.1vw, 1.82rem);
-  font-weight: 800;
-  line-height: 1.08;
+  text-transform: uppercase;
+  font-weight: 700;
+  font-stretch: 90%;
+  font-variation-settings: var(--font-variation-display);
+  line-height: 1.1;
   margin: 0;
-  letter-spacing: -0.03em;
+  letter-spacing: var(--tracking-display);
   text-wrap: balance;
+}
+
+.sec-title {
+  font-size: clamp(1.36rem, 2.05vw, 1.78rem);
 }
 
 .search-bar {
@@ -1100,7 +1170,12 @@ html[data-contrast="dark"] .liquid-stage-shell {
   grid-template-columns: 280px minmax(0, 1fr);
   overflow: hidden;
   contain: layout paint;
-  transition: background 0.14s ease;
+  transition: background 0.14s ease, box-shadow 0.14s ease;
+}
+
+.memorial-block.is-selected {
+  background: var(--plate-surface-hover);
+  box-shadow: inset 0 0 0 1.5px var(--accent);
 }
 
 .memorial-block:last-child {
@@ -1161,59 +1236,77 @@ body.timeline-chromeless-scroll::-webkit-scrollbar,
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 18px;
+  gap: 24px;
   width: 100%;
   overflow: hidden;
 }
 
-.timeline-date-whisper-slot {
-  min-height: 24px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.timeline-date-whisper {
-  background: transparent;
-  border: none;
-  padding: 4px 8px;
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  font-weight: 500;
-  letter-spacing: 0.06em;
-  color: var(--ink-mono);
-  opacity: 0.56;
-  transition: opacity 0.18s ease, color 0.18s ease;
-}
-
-.timeline-date-whisper:hover {
-  opacity: 1;
-  color: var(--ink-primary);
-}
-
-.timeline-date-whisper:focus-visible {
-  opacity: 1;
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  border-radius: 2px;
-}
-
 .porthole-ring {
-  width: 224px;
-  height: 224px;
+  position: relative;
+  isolation: isolate;
+  width: 236px;
+  height: 236px;
+  aspect-ratio: 1 / 1;
   margin: 0 auto;
-  padding: 10px;
+  padding: 11px;
+  border-radius: 50%;
   flex-shrink: 0;
+  background: var(--glass-fill-elevated);
+  background-image: linear-gradient(
+    148deg,
+    rgba(255, 255, 255, 0.52) 0%,
+    rgba(246, 249, 253, 0.16) 54%,
+    var(--accent-whisper) 100%
+  );
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  box-shadow:
+    var(--glass-3d-shadow),
+    inset 0 0 0 1px var(--grid-hairline-strong);
+}
+
+[data-theme="dark"] .porthole-ring,
+html[data-contrast="dark"] .porthole-ring {
+  background: var(--glass-fill-elevated);
+  background-image: linear-gradient(
+    148deg,
+    rgba(38, 48, 66, 0.54) 0%,
+    rgba(14, 19, 28, 0.34) 56%,
+    var(--accent-whisper) 100%
+  );
+}
+
+.porthole-sheen {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 2;
 }
 
 .porthole-lens {
   width: 100%;
   height: 100%;
+  aspect-ratio: 1 / 1;
   border-radius: 50%;
   overflow: hidden;
   border: 1px solid var(--grid-hairline-strong);
   position: relative;
+  z-index: 3;
   background: #0D1015;
+}
+
+.porthole-aperture-fallback {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at 34% 28%,
+    #252C38 0%,
+    #131720 55%,
+    #090B0E 100%
+  );
 }
 
 .portal-analog-slide {
@@ -1637,11 +1730,13 @@ table.clean-table {
     top: 48px;
     height: calc(100vh - 114px);
     height: calc(100dvh - 114px);
-    gap: 12px;
+    gap: 16px;
   }
   .porthole-ring {
-    width: 172px;
-    height: 172px;
+    width: 184px;
+    height: 184px;
+    aspect-ratio: 1 / 1;
+    border-radius: 50%;
     padding: 9px;
     margin: 0 auto;
   }

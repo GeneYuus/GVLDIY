@@ -460,7 +460,7 @@ export default function PhotosArtistsPanel({
       {/* Threaded Item Comments Moderation */}
       <section className="flex flex-col gap-2.5">
         <div className="flex items-baseline justify-between px-0.5">
-          <h3 className="text-sm font-extrabold tracking-tight m-0">Threaded Item Notes ({allFlattenedComments.length})</h3>
+          <h3 className="plate-title text-sm m-0">Threaded Item Notes ({allFlattenedComments.length})</h3>
           <span className="font-mono text-[11px] text-[var(--ink-mono)]">Videos, FLAC &amp; Archive Plates</span>
         </div>
         <div className="table-wrap">
@@ -491,7 +491,7 @@ export default function PhotosArtistsPanel({
       {/* Live Scene Chat Moderation */}
       <section className="flex flex-col gap-2.5">
         <div className="flex items-baseline justify-between px-0.5">
-          <h3 className="text-sm font-extrabold tracking-tight m-0">Live Scene Room Chat ({sceneChat.length})</h3>
+          <h3 className="plate-title text-sm m-0">Live Scene Room Chat ({sceneChat.length})</h3>
           <span className="font-mono text-[11px] text-[var(--ink-mono)]">Real-Time Community Feed</span>
         </div>
         <div className="table-wrap">

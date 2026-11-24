@@ -2,7 +2,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
   checkPublicWriteRateLimit,
-  claimCommentVoteOnce,
   extractClientIpHash,
   readBoundedJsonBody,
 } from '@/lib/security/publicRequestGuard';
@@ -25,18 +24,6 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   const ipHash = extractClientIpHash(req);
-  const rateCheck = checkPublicWriteRateLimit(ipHash, 'public-archive', 6);
-  if (!rateCheck.allowed) {
-    return NextResponse.json(
-      {
-        error: `Rate limit reached (max 6 posts/min). Retry in ${rateCheck.retryAfterSec}s.`,
-      },
-      {
-        status: 429,
-        headers: { 'Retry-After': String(rateCheck.retryAfterSec) },
-      }
-    );
-  }
 
   const parsed = await readBoundedJsonBody<Record<string, unknown>>(req, 8192);
   if (!parsed.ok) {
@@ -56,6 +43,30 @@ export async function POST(req: NextRequest) {
       who,
       msg,
     } = body;
+
+    const isPreview = process.env.NODE_ENV !== 'production';
+    const isVoteAction = action === 'vote-comment';
+    const scope = isVoteAction ? 'public-archive-vote' : 'public-archive-post';
+    const maxPerMin = isVoteAction
+      ? isPreview
+        ? 60
+        : 30
+      : isPreview
+      ? 30
+      : 12;
+
+    const rateCheck = checkPublicWriteRateLimit(ipHash, scope, maxPerMin);
+    if (!rateCheck.allowed) {
+      return NextResponse.json(
+        {
+          error: `Please wait ${rateCheck.retryAfterSec}s before submitting again.`,
+        },
+        {
+          status: 429,
+          headers: { 'Retry-After': String(rateCheck.retryAfterSec) },
+        }
+      );
+    }
 
     if (action === 'send-chat') {
       if (!msg || typeof msg !== 'string' || !msg.trim()) {
@@ -100,7 +111,7 @@ export async function POST(req: NextRequest) {
       ) {
         return NextResponse.json({ error: 'Invalid vote payload' }, { status: 400 });
       }
-      if (!claimCommentVoteOnce(ipHash, commentId)) {
+      if (!(await archiveRepository.claimCommentVote(ipHash, commentId))) {
         return NextResponse.json(
           { error: 'Vote already recorded for this comment' },
           { status: 429 }

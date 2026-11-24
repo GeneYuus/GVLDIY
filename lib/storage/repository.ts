@@ -1,9 +1,12 @@
 // lib/storage/repository.ts
+import fs from 'node:fs';
+import path from 'node:path';
 import type { Pool } from 'mysql2/promise';
 import {
   AdminSiteSettings,
   ArchiveDataset,
   AuditLogEntry,
+  AuditLogPageResult,
   CommentNode,
   CommentReply,
   FlacRecording,
@@ -30,6 +33,7 @@ import {
   getRuntimePostureSnapshot,
   isHostingerMysqlConfigured,
 } from '@/lib/config/runtimeEnv';
+import { claimCommentVoteOnce } from '@/lib/security/publicRequestGuard';
 import { sanitizeScopedFlyerCss } from '@/lib/security/sanitize';
 import {
   IMG_BORO_GLASS,
@@ -44,8 +48,12 @@ import {
   resolveMediaUrl,
 } from '@/lib/media/resolveMediaUrl';
 import {
+  AdminMfaRowRecord,
   appendCommentReplySql,
   appendSceneChatSql,
+  claimCommentVoteSql,
+  claimTotpStepAtomicSql,
+  countAuditLogsSql,
   countTableRowsSql,
   deleteArtistSql,
   deleteAuctionSql,
@@ -60,10 +68,12 @@ import {
   deleteSubscriberSql,
   deleteTimelineEraSql,
   deleteVideoSql,
+  disableAdminMfaSql,
   fetchAdminDatasetSql,
   fetchLivePollSnapshotSql,
   fetchPublicPayloadSql,
   findAuctionByMediaOrIdSql,
+  getAdminMfaConfigSql,
   getArtistByIdSql,
   getAuctionByIdSql,
   getCalendarShowByIdSql,
@@ -92,7 +102,9 @@ import {
   listAuditLogsSql,
   listPuckPagesSql,
   listSubscribersSql,
+  promotePendingMfaSecretSql,
   reorderTimelineErasSql,
+  savePendingMfaSecretSql,
   updateArtistSql,
   updateAuctionSql,
   updateCalendarShowSql,
@@ -100,6 +112,7 @@ import {
   updateFutureTaskStatusSql,
   updatePhotoSql,
   updatePlaceSql,
+  updateRecoveryHashesSql,
   updateSubscriberSql,
   updateTimelineEraSql,
   updateVideoSql,
@@ -258,8 +271,8 @@ const SEED_PUCK_PAGES: PuckPageRecord[] = [
     color: #f4f1e8;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
-  .tag { color: #ff5900; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; }
-  h3 { margin: 6px 0 6px; font-size: 16px; }
+  .tag { color: #ff5900; font-size: 11px; font-weight: 700; letter-spacing: 0.075em; text-transform: uppercase; }
+  h3 { margin: 6px 0 6px; font-size: 16px; letter-spacing: 0.015em; }
   p { margin: 0; font-size: 12.5px; line-height: 1.5; color: #cbd5e1; }
 </style>
 </head>
@@ -519,6 +532,18 @@ const INITIAL_SEED: ArchiveDataset = {
       tags: ['the-barn', 'punk-rock', 'greenville'],
     },
     {
+      id: 'CAL-05',
+      isoDate: '2026-11-21',
+      monthKey: '2026-11',
+      dayOfMonth: 21,
+      title: 'Afternoon Quarter-Pipe Patch & Slappy Jam',
+      venue: 'Poe Mill',
+      doorsInfo: '1:30 PM · Bring Trowels',
+      flyerStyle: 'concrete-stencil',
+      flyerHeadlineNote: 'PRE-SHOW CONCRETE WORKDAY BEFORE BARN DOORS',
+      tags: ['poe-mill', 'skate', 'greenville'],
+    },
+    {
       id: 'CAL-02',
       isoDate: '2026-11-28',
       monthKey: '2026-11',
@@ -563,7 +588,7 @@ const INITIAL_SEED: ArchiveDataset = {
       title: 'F.W. Poe Textile Mill Built & Shuttered',
       summary:
         'Constructed in 1896 on Greenville’s west side; ran 80 years until Burlington Industries closed the gates in 1977.',
-      portholeImageUrl: IMG_POE_MILL,
+      portholeImageUrl: '/assets/timeline/era_01_poe_mill.jpg',
       sortOrder: 0,
     },
     {
@@ -573,7 +598,7 @@ const INITIAL_SEED: ArchiveDataset = {
       title: 'Two Mill Fires & First Skater Concrete',
       summary:
         'Fires left only brick smokestacks and concrete slabs. Skaters cleared rubble by hand and poured Greenville’s DIY park.',
-      portholeImageUrl: IMG_POE_MILL,
+      portholeImageUrl: '/assets/timeline/era_02_concrete_pour.jpg',
       sortOrder: 1,
     },
     {
@@ -583,7 +608,7 @@ const INITIAL_SEED: ArchiveDataset = {
       title: 'No Name & S.P.O.G. Close Doors',
       summary:
         'When Greenville’s indoor wooden skateparks closed, self-built concrete at Poe Mill became the scene’s permanent anchor.',
-      portholeImageUrl: IMG_POE_MILL,
+      portholeImageUrl: '/assets/timeline/era_03_wood_skatepark.jpg',
       sortOrder: 2,
     },
     {
@@ -593,7 +618,7 @@ const INITIAL_SEED: ArchiveDataset = {
       title: 'Curly Blue Turned Away -> The Barn Born',
       summary:
         'After Curly Blue could not get booked at Radio Room, practice sessions inside The Barn turned into full underground bills.',
-      portholeImageUrl: IMG_THE_BARN,
+      portholeImageUrl: '/assets/timeline/era_04_barn_origin.jpg',
       sortOrder: 3,
     },
     {
@@ -603,7 +628,7 @@ const INITIAL_SEED: ArchiveDataset = {
       title: 'Poe Mill Friendships & Craigslist Jams',
       summary:
         'Skyler’s Craigslist musician post and friendships forged at Poe (Chandler, B-Man, Zach of Rocco & His Bones) carried The Barn forward.',
-      portholeImageUrl: IMG_THE_BARN,
+      portholeImageUrl: '/assets/timeline/era_05_poe_jam.jpg',
       sortOrder: 4,
     },
     {
@@ -613,7 +638,7 @@ const INITIAL_SEED: ArchiveDataset = {
       title: 'Developer Sale & Velo Fellow Closing',
       summary:
         'The 2021 Poe Mill land sale and Dec 2024 loss of The Velo Fellow sparked an urgent push to preserve tapes, film, and stories.',
-      portholeImageUrl: IMG_VELO_STAGE,
+      portholeImageUrl: '/assets/timeline/era_06_brick_stage.jpg',
       sortOrder: 5,
     },
     {
@@ -623,7 +648,7 @@ const INITIAL_SEED: ArchiveDataset = {
       title: 'Unified Carolinas DIY Archive & Barter Market',
       summary:
         'Fast, mobile-first archive uniting Upstate SC & Asheville bands, lossless FLAC recordings, custom show flyers, and 0%-fee artist auctions.',
-      portholeImageUrl: IMG_THE_BARN,
+      portholeImageUrl: '/assets/timeline/era_07_archive_deck.jpg',
       sortOrder: 6,
     },
   ],
@@ -907,18 +932,102 @@ const INITIAL_SEED: ArchiveDataset = {
       createdAtIso: '2026-11-21T07:45:00Z',
     },
     {
+      id: 'IT-07',
+      passPhase: 'Pass 9',
+      title:
+        'Carved Bricolage Inktrap (90% wdth) Self-Hosted Typography, Open Header Tracking & Multi-Show Calendar Switcher',
+      area: 'UI & Media',
+      priority: 'P0',
+      status: 'Completed',
+      rationale:
+        'Shipped in Pass 9: bundled self-hosted @fontsource-variable/bricolage-grotesque (standard wdth+opsz+wght), @fontsource-variable/azeret-mono, and @fontsource-variable/schibsted-grotesk under strict CSP font-src self, replaced negative header tracking with open architectural tracking (+0.055em/+0.035em/+0.015em), and added 4px mechanical same-day show keys in Calendar.',
+      prerequisite:
+        'Active across all public archive views, /p/[slug] zines, and /admin panels.',
+      createdAtIso: '2026-11-22T12:50:00Z',
+    },
+    {
+      id: 'IT-08',
+      passPhase: 'Pass 10',
+      title:
+        'RFC 6238 TOTP 2FA (SVG QR + AES-256-GCM + Anti-Replay + Recovery Codes), Per-IP Brute-Force Isolation, Audit CSV/Pagination & API Hardening',
+      area: 'Auth & Security',
+      priority: 'P0',
+      status: 'Completed',
+      rationale:
+        'Shipped in Pass 10: native RFC 6238 TOTP 2FA with server-rendered inline SVG QR, HKDF AES-256-GCM encrypted secrets, atomic matchedStep anti-replay lock, 8 SHA-256 backup recovery codes, per-IP 5-strike lockout + global 60s burst shield, filtered 50-row paginated audit trail + formula-safe CSV export, 32 KB admin body cap, IG Content-Length pre-check, and MySQL comment_votes.',
+      prerequisite:
+        'Active across /admin two-step login, 08. Cutover & Next Pass security console, and public/webhook guards.',
+      createdAtIso: '2026-11-22T14:25:00Z',
+    },
+    {
+      id: 'IT-09',
+      passPhase: 'Pass 11',
+      title:
+        'Shareable Archive Deep-Links (?tab=&item=&t=&month=), 4px [ COPY LINK ] Keys & Hostinger 512 MiB Runtime Alignment',
+      area: 'Hostinger MySQL',
+      priority: 'P1',
+      status: 'Completed',
+      rationale:
+        'Shipped in Pass 11: removed standalone output mismatch for native Hostinger next start, capped production start heap to 512 MiB (retaining 1152 MiB for dev/build), synced HOSTINGER_CUTOVER.md, and added live history.replaceState URL sync + [ COPY LINK ] keys across Video, FLAC, Calendar, Photo, Memorial, and Auction views.',
+      prerequisite:
+        'Active across all public archive stages, cards, and managed Hostinger runtime scripts.',
+      createdAtIso: '2026-11-22T15:08:00Z',
+    },
+    {
       id: 'IT-06',
       passPhase: 'Hostinger',
       title:
-        'Live hPanel Env Secrets (ADMIN_PASSWORD_HASH, ADMIN_SESSION_SECRET, DB_HOST=127.0.0.1), Cloudflare Edge WAF & Nightly R2 Backup',
+        'Hostinger MySQL + Secrets (DB_HOST=127.0.0.1, ADMIN_PASSWORD_HASH, ADMIN_SESSION_SECRET)',
       area: 'Hostinger MySQL',
       priority: 'P0',
+      status: 'Planned',
+      rationale:
+        'External credential cutover: create local Hostinger MySQL database/user (Remote MySQL disabled) and paste 16+ char scrypt ADMIN_PASSWORD_HASH + 64-hex ADMIN_SESSION_SECRET into hPanel environment variables.',
+      prerequisite:
+        'Requires live Hostinger hPanel Node.js Web App & MySQL database credentials.',
+      createdAtIso: '2026-11-21T07:45:00Z',
+    },
+    {
+      id: 'EXT-01',
+      passPhase: 'Storage / CDN',
+      title:
+        'Google Drive / R2 Keys (GDRIVE_CLIENT_EMAIL, GDRIVE_PRIVATE_KEY & NEXT_PUBLIC_R2_PUBLIC_URL)',
+      area: 'Google Drive / R2',
+      priority: 'P1',
+      status: 'Planned',
+      rationale:
+        'External storage keys: attach read-only Google Service Account credentials for HTTP 206 byte-range streaming and/or custom Cloudflare R2 zero-egress media domain.',
+      prerequisite:
+        'Requires Google Cloud Service Account JSON or Cloudflare R2 public bucket domain.',
+      createdAtIso: '2026-11-22T15:08:00Z',
+    },
+    {
+      id: 'EXT-02',
+      passPhase: 'Hostinger',
+      title:
+        'Cloudflare Edge WAF Rate-Limiting Rules & Full (Strict) TLS Cutover',
+      area: 'Auth & Security',
+      priority: 'P1',
+      status: 'Planned',
+      rationale:
+        'External DNS & edge cutover: point greenvillediyarchive.org and thebartermarket.org through Cloudflare with Full (Strict) SSL and attach Edge WAF rules on /api/admin/auth and public write endpoints.',
+      prerequisite:
+        'Requires Cloudflare DNS zone activation for greenvillediyarchive.org and thebartermarket.org.',
+      createdAtIso: '2026-11-22T15:08:00Z',
+    },
+    {
+      id: 'EXT-03',
+      passPhase: 'Hostinger',
+      title:
+        'Meta IG Webhook App Review (IG_WEBHOOK_APP_SECRET & IG_VERIFY_TOKEN)',
+      area: 'IG Webhooks',
+      priority: 'P2',
       status: 'Deferred',
       rationale:
-        'Final live cutover: provision Hostinger MySQL credentials, paste 16+ char ADMIN_PASSWORD_HASH & 64-hex ADMIN_SESSION_SECRET, lock Remote MySQL, and attach Cloudflare WAF.',
+        'External Meta Graph API setup: connect verified Meta App webhook credentials so artist "SOLD" comments mark Barter Market items sold automatically.',
       prerequisite:
-        'Set Hostinger hPanel Node.js environment variables and point greenvillediyarchive.org DNS.',
-      createdAtIso: '2026-11-21T07:45:00Z',
+        'Requires Meta Developer App approval and Instagram Graph API comment subscription.',
+      createdAtIso: '2026-11-22T15:08:00Z',
     },
     {
       id: 'P5-01',
@@ -955,7 +1064,104 @@ const PREVIEW_SCENE_CHAT_DISPLAY = 40;
 const globalForArchive = globalThis as unknown as {
   __gvlDiyStore?: ArchiveDataset;
   __gvlAuditLogs?: AuditLogEntry[];
+  __gvlMfaConfigFallback?: AdminMfaRowRecord;
 };
+
+const PREVIEW_AUTH_SECURITY_SET = new Set<string>([
+  'totp_enrolled',
+  'totp_verified',
+  'totp_replay_blocked',
+  'recovery_code_used',
+  'totp_disabled',
+  'TOTP_FAILED',
+  'LOGIN_PASSKEY_OK',
+  'LOGIN_DEMO_OK',
+  'LOGIN_FAILED',
+  'LOGIN_DEMO_BLOCKED',
+  'LOCKOUT_TRIGGERED',
+  'GLOBAL_BURST_THROTTLED',
+  'SESSION_REVOKED',
+  'REVOKE_ALL_SESSIONS',
+  'HASH_GENERATED',
+]);
+
+function filterPreviewAuditEntries(
+  entries: AuditLogEntry[],
+  actionFilter?: string
+): AuditLogEntry[] {
+  const clean = String(actionFilter || 'all').trim();
+  if (!clean || clean === 'all') return entries;
+  if (clean === 'auth_security') {
+    return entries.filter((e) => PREVIEW_AUTH_SECURITY_SET.has(e.actionName));
+  }
+  return entries.filter((e) => e.actionName === clean);
+}
+
+function getLocalMfaFallbackFilePath(): string {
+  return path.resolve(process.cwd(), '.next', 'cache', 'admin-mfa-fallback.json');
+}
+
+function readLocalMfaFallback(): AdminMfaRowRecord {
+  if (globalForArchive.__gvlMfaConfigFallback) {
+    return globalForArchive.__gvlMfaConfigFallback;
+  }
+
+  const emptyRecord: AdminMfaRowRecord = {
+    enabled: false,
+    encryptedSecret: null,
+    pendingEncryptedSecret: null,
+    lastAcceptedStep: null,
+    recoveryHashes: [],
+    updatedAtIso: null,
+  };
+
+  try {
+    const filePath = getLocalMfaFallbackFilePath();
+    if (fs.existsSync(filePath)) {
+      const raw = JSON.parse(fs.readFileSync(filePath, 'utf8')) as Partial<AdminMfaRowRecord>;
+      const hydrated: AdminMfaRowRecord = {
+        enabled: Boolean(raw.enabled),
+        encryptedSecret:
+          typeof raw.encryptedSecret === 'string' ? raw.encryptedSecret : null,
+        pendingEncryptedSecret:
+          typeof raw.pendingEncryptedSecret === 'string'
+            ? raw.pendingEncryptedSecret
+            : null,
+        lastAcceptedStep:
+          typeof raw.lastAcceptedStep === 'number' &&
+          Number.isFinite(raw.lastAcceptedStep)
+            ? raw.lastAcceptedStep
+            : null,
+        recoveryHashes: Array.isArray(raw.recoveryHashes)
+          ? raw.recoveryHashes.map((h) => String(h || '')).filter(Boolean)
+          : [],
+        updatedAtIso:
+          typeof raw.updatedAtIso === 'string' ? raw.updatedAtIso : null,
+      };
+      globalForArchive.__gvlMfaConfigFallback = hydrated;
+      return hydrated;
+    }
+  } catch {
+    // Ignore cache read issues and fall back to clean memory state
+  }
+
+  globalForArchive.__gvlMfaConfigFallback = emptyRecord;
+  return emptyRecord;
+}
+
+function writeLocalMfaFallback(next: AdminMfaRowRecord): void {
+  globalForArchive.__gvlMfaConfigFallback = structuredClone(next);
+  try {
+    const filePath = getLocalMfaFallbackFilePath();
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, JSON.stringify(next, null, 2), {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
+  } catch {
+    // Non-fatal in read-only sandboxes; globalThis mirror remains authoritative
+  }
+}
 
 function isMysqlConfigured(): boolean {
   return isHostingerMysqlConfigured();
@@ -976,7 +1182,7 @@ function getPreviewAuditLogs(): AuditLogEntry[] {
         id: 'audit-boot-1',
         curatorUsername: 'system',
         actionName: 'SECURITY_POSTURE_READY',
-        targetId: 'IT-01..IT-05',
+        targetId: 'IT-01..IT-08',
         createdAtIso: '2026-11-21T07:45:00Z',
       },
     ];
@@ -1011,10 +1217,36 @@ function getPreviewStore(): ArchiveDataset {
           seedTask.id === 'IT-02' ||
           seedTask.id === 'IT-03' ||
           seedTask.id === 'IT-04' ||
-          seedTask.id === 'IT-05'
+          seedTask.id === 'IT-05' ||
+          seedTask.id === 'IT-06' ||
+          seedTask.id === 'IT-07' ||
+          seedTask.id === 'IT-08' ||
+          seedTask.id === 'IT-09'
         ) {
           globalForArchive.__gvlDiyStore.futureTasks[idx] = structuredClone(seedTask);
         }
+      }
+    }
+    if (Array.isArray(globalForArchive.__gvlDiyStore.timeline)) {
+      for (const seedEra of INITIAL_SEED.timeline) {
+        const existingEra = globalForArchive.__gvlDiyStore.timeline.find(
+          (e) => e.id === seedEra.id
+        );
+        if (
+          existingEra &&
+          existingEra.portholeImageUrl.startsWith('data:image/jpeg;base64,')
+        ) {
+          existingEra.portholeImageUrl = seedEra.portholeImageUrl;
+        }
+      }
+    }
+    if (Array.isArray(globalForArchive.__gvlDiyStore.calendar)) {
+      const hasCal05 = globalForArchive.__gvlDiyStore.calendar.some(
+        (ev) => ev.id === 'CAL-05'
+      );
+      const seedCal05 = INITIAL_SEED.calendar.find((ev) => ev.id === 'CAL-05');
+      if (!hasCal05 && seedCal05) {
+        globalForArchive.__gvlDiyStore.calendar.push(structuredClone(seedCal05));
       }
     }
     if (Array.isArray(globalForArchive.__gvlDiyStore.timeline)) {
@@ -1184,30 +1416,34 @@ export const archiveRepository = {
       storageDriver: 'hostinger-mysql' | 'preview-memory';
       runtimePosture: RuntimePostureSnapshot;
       auditLogs: AuditLogEntry[];
+      auditTotal: number;
     }
   > {
     const pool = await getInitializedMysqlPool().catch(() => null);
     if (pool) {
-      const [dataset, auditLogs] = await Promise.all([
+      const [dataset, auditLogs, auditTotal] = await Promise.all([
         fetchAdminDatasetSql(pool, INITIAL_SEED.siteSettings),
-        listAuditLogsSql(pool, 40),
+        listAuditLogsSql(pool, 50, 0, 'all'),
+        countAuditLogsSql(pool, 'all'),
       ]);
       return {
         ...dataset,
         storageDriver: 'hostinger-mysql',
         runtimePosture: getRuntimePostureSnapshot(),
         auditLogs,
+        auditTotal,
       };
     }
 
     const store = getPreviewStore();
-    const auditLogs = await this.listAuditLogs(40);
+    const allLogs = getPreviewAuditLogs();
     return {
       ...structuredClone(store),
       sceneChat: structuredClone(store.sceneChat.slice(-PREVIEW_SCENE_CHAT_DISPLAY)),
       storageDriver: 'preview-memory',
       runtimePosture: getRuntimePostureSnapshot(),
-      auditLogs,
+      auditLogs: structuredClone(allLogs.slice(0, 50)),
+      auditTotal: allLogs.length,
     };
   },
 
@@ -1246,13 +1482,194 @@ export const archiveRepository = {
     return structuredClone(entry);
   },
 
-  async listAuditLogs(limit = 40): Promise<AuditLogEntry[]> {
+  async listAuditLogs(limit = 50): Promise<AuditLogEntry[]> {
     const safeLimit = Math.max(1, Math.min(200, Math.floor(limit)));
     const pool = await getInitializedMysqlPool().catch(() => null);
     if (pool) {
-      return listAuditLogsSql(pool, safeLimit);
+      return listAuditLogsSql(pool, safeLimit, 0, 'all');
     }
     return structuredClone(getPreviewAuditLogs().slice(0, safeLimit));
+  },
+
+  async queryAuditLogs(options?: {
+    filter?: string;
+    page?: number;
+    pageSize?: number;
+  }): Promise<AuditLogPageResult> {
+    const cleanFilter = String(options?.filter || 'all').trim() || 'all';
+    const pageSize = Math.max(
+      1,
+      Math.min(200, Math.floor(Number(options?.pageSize) || 50))
+    );
+    const page = Math.max(1, Math.floor(Number(options?.page) || 1));
+    const offset = (page - 1) * pageSize;
+
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      const [total, logs] = await Promise.all([
+        countAuditLogsSql(pool, cleanFilter),
+        listAuditLogsSql(pool, pageSize, offset, cleanFilter),
+      ]);
+      return {
+        logs,
+        total,
+        page,
+        pageSize,
+        filter: cleanFilter,
+      };
+    }
+
+    const filtered = filterPreviewAuditEntries(getPreviewAuditLogs(), cleanFilter);
+    return {
+      logs: structuredClone(filtered.slice(offset, offset + pageSize)),
+      total: filtered.length,
+      page,
+      pageSize,
+      filter: cleanFilter,
+    };
+  },
+
+  async serializeAuditLogsToCsv(filter = 'all'): Promise<string> {
+    const cleanFilter = String(filter || 'all').trim() || 'all';
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    const rows = pool
+      ? await listAuditLogsSql(pool, 5000, 0, cleanFilter)
+      : filterPreviewAuditEntries(getPreviewAuditLogs(), cleanFilter);
+
+    const sanitizeFormulaCell = (raw: string): string => {
+      const cell = String(raw ?? '').replace(/\r?\n/g, ' ');
+      if (/^[=+\-@\t\r]/.test(cell)) {
+        return `'${cell}`;
+      }
+      return cell;
+    };
+    const escapeCsv = (val: string) =>
+      `"${sanitizeFormulaCell(val).replace(/"/g, '""')}"`;
+
+    const header = 'TimestampUTC,Actor,Event,TargetReference';
+    const lines = rows.map((r) =>
+      [
+        r.createdAtIso,
+        r.curatorUsername,
+        r.actionName,
+        r.targetId || '',
+      ]
+        .map(escapeCsv)
+        .join(',')
+    );
+    return [header, ...lines].join('\n');
+  },
+
+  // ==================== MFA PERSISTENCE & COMMENT VOTE DEDUP ====================
+  async getMfaConfigRow(): Promise<AdminMfaRowRecord> {
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      return getAdminMfaConfigSql(pool);
+    }
+    return structuredClone(readLocalMfaFallback());
+  },
+
+  async savePendingMfaSecret(pendingEncryptedSecret: string): Promise<void> {
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      await savePendingMfaSecretSql(pool, pendingEncryptedSecret);
+      return;
+    }
+    const current = readLocalMfaFallback();
+    writeLocalMfaFallback({
+      ...current,
+      pendingEncryptedSecret,
+      updatedAtIso: new Date().toISOString(),
+    });
+  },
+
+  async promotePendingMfaSecret(
+    encryptedSecret: string,
+    matchedStep: number,
+    recoveryHashes: string[]
+  ): Promise<void> {
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      await promotePendingMfaSecretSql(
+        pool,
+        encryptedSecret,
+        matchedStep,
+        recoveryHashes
+      );
+      return;
+    }
+    const current = readLocalMfaFallback();
+    writeLocalMfaFallback({
+      ...current,
+      enabled: true,
+      encryptedSecret,
+      pendingEncryptedSecret: null,
+      lastAcceptedStep:
+        current.lastAcceptedStep !== null
+          ? Math.max(current.lastAcceptedStep, matchedStep)
+          : matchedStep,
+      recoveryHashes: [...recoveryHashes],
+      updatedAtIso: new Date().toISOString(),
+    });
+  },
+
+  async claimTotpStepAtomic(matchedStep: number): Promise<boolean> {
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      return claimTotpStepAtomicSql(pool, matchedStep);
+    }
+    const current = readLocalMfaFallback();
+    if (
+      current.lastAcceptedStep !== null &&
+      matchedStep <= current.lastAcceptedStep
+    ) {
+      return false;
+    }
+    writeLocalMfaFallback({
+      ...current,
+      lastAcceptedStep: matchedStep,
+      updatedAtIso: new Date().toISOString(),
+    });
+    return true;
+  },
+
+  async updateRecoveryHashes(recoveryHashes: string[]): Promise<void> {
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      await updateRecoveryHashesSql(pool, recoveryHashes);
+      return;
+    }
+    const current = readLocalMfaFallback();
+    writeLocalMfaFallback({
+      ...current,
+      recoveryHashes: [...recoveryHashes],
+      updatedAtIso: new Date().toISOString(),
+    });
+  },
+
+  async disableMfaConfig(): Promise<void> {
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      await disableAdminMfaSql(pool);
+      return;
+    }
+    const current = readLocalMfaFallback();
+    writeLocalMfaFallback({
+      ...current,
+      enabled: false,
+      encryptedSecret: null,
+      pendingEncryptedSecret: null,
+      recoveryHashes: [],
+      updatedAtIso: new Date().toISOString(),
+    });
+  },
+
+  async claimCommentVote(ipHash: string, commentId: string): Promise<boolean> {
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      return claimCommentVoteSql(pool, commentId, ipHash);
+    }
+    return claimCommentVoteOnce(ipHash, commentId);
   },
 
   async isPublishedDriveFileId(cleanFileId: string): Promise<boolean> {
@@ -2043,15 +2460,16 @@ export const archiveRepository = {
     if (!cleanTitle || !cleanEraRange) {
       throw new Error('Era range and title are required');
     }
+    const defaultTimelineImg = '/assets/timeline/era_01_poe_mill.jpg';
     const resolvedImg = input.sourceIdOrUrl?.trim()
       ? resolveMediaUrl(
           input.sourceType || 'embedded',
           input.sourceIdOrUrl,
-          IMG_POE_MILL
+          defaultTimelineImg
         )
       : input.portholeImageUrl?.trim()
-      ? sanitizeSafeMediaOrWebUrl(input.portholeImageUrl, IMG_POE_MILL)
-      : IMG_POE_MILL;
+      ? sanitizeSafeMediaOrWebUrl(input.portholeImageUrl, defaultTimelineImg)
+      : defaultTimelineImg;
 
     const pool = await getInitializedMysqlPool().catch(() => null);
     const count = pool

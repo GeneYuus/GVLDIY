@@ -21,7 +21,6 @@ import {
   ThumbsDown,
   ThumbsUp,
 } from 'lucide-react';
-import { Render, type Data } from '@puckeditor/core';
 import {
   AdminSiteSettings,
   CommentNode,
@@ -34,8 +33,8 @@ import {
   SeasonTheme,
   ShowCalendarEvent,
 } from '@/types/archive';
-import { puckConfig, type ArchivePuckProps } from '@/lib/puck/puck.config';
 import { PublicArchivePayload } from '@/lib/storage/repository';
+import PuckStaticRenderer from '@/components/puck/PuckStaticRenderer';
 import { runViewTransition } from '@/lib/motion/lagless-ticker';
 import TactilePortholeTimeline from '@/components/timeline/TactilePortholeTimeline';
 import MonthFlyerCalendar from '@/components/calendar/MonthFlyerCalendar';
@@ -49,10 +48,44 @@ import {
 import LiquidGlassStage from '@/components/fx/LiquidGlassStage';
 import { sanitizeSafeHref } from '@/lib/security/sanitize';
 
+export interface InitialArchiveDeepLink {
+  itemId?: string;
+  timeSec?: number;
+  monthKey?: string;
+}
+
 interface ResponsiveArchiveShellProps {
   initialPayload: PublicArchivePayload;
   isAdminAuthenticated?: boolean;
   initialSection?: PublicArchiveSection;
+  initialDeepLink?: InitialArchiveDeepLink;
+}
+
+function formatMmSs(totalSec: number): string {
+  const safe = Math.max(0, Math.floor(totalSec));
+  const mins = Math.floor(safe / 60);
+  const secs = safe % 60;
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
+
+function buildArchiveQueryPath(params: {
+  tab: PublicArchiveSection;
+  item?: string | null;
+  t?: number | null;
+  month?: string | null;
+}): string {
+  const qs = new URLSearchParams();
+  qs.set('tab', params.tab);
+  if (params.month) {
+    qs.set('month', params.month);
+  }
+  if (params.item) {
+    qs.set('item', params.item);
+  }
+  if (typeof params.t === 'number' && Number.isFinite(params.t) && params.t > 0) {
+    qs.set('t', String(Math.floor(params.t)));
+  }
+  return `/?${qs.toString()}`;
 }
 
 const SCENE_QA_ANSWERS: Record<string, string> = {
@@ -102,6 +135,7 @@ export default function ResponsiveArchiveShell({
   initialPayload,
   isAdminAuthenticated = false,
   initialSection = 'videos',
+  initialDeepLink,
 }: ResponsiveArchiveShellProps) {
   const [activeTab, setActiveTab] =
     useState<PublicArchiveSection>(initialSection);
@@ -116,6 +150,7 @@ export default function ResponsiveArchiveShell({
   );
   const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [copiedLinkKey, setCopiedLinkKey] = useState<string | null>(null);
 
   // Public archive datasets
   const [videos] = useState(initialPayload.videos);
@@ -137,8 +172,11 @@ export default function ResponsiveArchiveShell({
     Record<string, CommentNode[]>
   >(initialPayload.commentsByItem);
 
-  // Hoisted lossless FLAC playback engine (persists uninterrupted across tab switches)
-  const [audioEngine, primaryAudioRef] = useLosslessAudioEngine(audioTracks);
+  // Hoisted lossless FLAC playback engine (cues deep-linked track & timestamp ready-to-play)
+  const [audioEngine, primaryAudioRef] = useLosslessAudioEngine(
+    audioTracks,
+    initialSection === 'audio' ? initialDeepLink : undefined
+  );
 
   // Per-tab flat search queries
   const [searchQueries, setSearchQueries] = useState<Record<string, string>>({
@@ -150,17 +188,95 @@ export default function ResponsiveArchiveShell({
     auction: '',
   });
 
-  // Video stage state
-  const firstVid = initialPayload.videos[0];
-  const [selectedVidId, setSelectedVidId] = useState(firstVid?.id || 'VID-01');
-  const [vidSeekText, setVidSeekText] = useState(
-    firstVid?.timestamps[0]
-      ? `${firstVid.timestamps[0].time} — ${firstVid.timestamps[0].label}`
-      : '00:00 — Full Tape'
+  // Video stage state (hydrated from ?tab=videos&item=&t= when deep-linked)
+  const initialTargetVid =
+    (initialSection === 'videos' && initialDeepLink?.itemId
+      ? initialPayload.videos.find((v) => v.id === initialDeepLink.itemId)
+      : undefined) || initialPayload.videos[0];
+
+  const initialVidCue = (() => {
+    if (!initialTargetVid) {
+      return { sec: 0, text: '00:00 — Full Tape' };
+    }
+    if (
+      initialSection === 'videos' &&
+      typeof initialDeepLink?.timeSec === 'number' &&
+      initialDeepLink.timeSec >= 0
+    ) {
+      const targetSec = Math.floor(initialDeepLink.timeSec);
+      const exactTs = initialTargetVid.timestamps.find(
+        (ts) => ts.sec === targetSec
+      );
+      if (exactTs) {
+        return { sec: targetSec, text: `${exactTs.time} — ${exactTs.label}` };
+      }
+      const preceding = [...initialTargetVid.timestamps]
+        .reverse()
+        .find((ts) => ts.sec <= targetSec);
+      return {
+        sec: targetSec,
+        text: `${formatMmSs(targetSec)} — ${
+          preceding?.label || 'Cued Offset'
+        }`,
+      };
+    }
+    const firstTs = initialTargetVid.timestamps[0];
+    return firstTs
+      ? { sec: firstTs.sec, text: `${firstTs.time} — ${firstTs.label}` }
+      : { sec: 0, text: '00:00 — Full Tape' };
+  })();
+
+  const [selectedVidId, setSelectedVidId] = useState(
+    initialTargetVid?.id || 'VID-01'
   );
-  const [vidSeekSeconds, setVidSeekSeconds] = useState(0);
+  const [vidSeekText, setVidSeekText] = useState(initialVidCue.text);
+  const [vidSeekSeconds, setVidSeekSeconds] = useState(initialVidCue.sec);
   const [vidLiveEmbedMode, setVidLiveEmbedMode] = useState(false);
   const [videoNotesOpen, setVideoNotesOpen] = useState(false);
+
+  // Calendar selection state (for live URL bar sync)
+  const initialCalState = (() => {
+    const sortedMonths = Array.from(
+      new Set(initialPayload.calendar.map((e) => e.monthKey))
+    ).sort();
+    const matchedEv =
+      initialSection === 'calendar' && initialDeepLink?.itemId
+        ? initialPayload.calendar.find((e) => e.id === initialDeepLink.itemId)
+        : undefined;
+    const mKey =
+      matchedEv?.monthKey ||
+      (initialSection === 'calendar' ? initialDeepLink?.monthKey : undefined) ||
+      sortedMonths[0] ||
+      '2026-11';
+    const firstInMonth = initialPayload.calendar
+      .filter((e) => e.monthKey === mKey)
+      .sort((a, b) => a.dayOfMonth - b.dayOfMonth || a.id.localeCompare(b.id))[0];
+    return {
+      monthKey: mKey,
+      eventId: matchedEv?.id || firstInMonth?.id || null,
+    };
+  })();
+
+  const [calActiveMonth, setCalActiveMonth] = useState<string>(
+    initialCalState.monthKey
+  );
+  const [calActiveEventId, setCalActiveEventId] = useState<string | null>(
+    initialCalState.eventId
+  );
+
+  // Spotlight state for deep-linked Photo, Memorial, Artist, or Auction entries
+  const [spotlightItemId, setSpotlightItemId] = useState<string | null>(() => {
+    if (
+      initialDeepLink?.itemId &&
+      (initialSection === 'photos' ||
+        initialSection === 'remembered' ||
+        initialSection === 'auction' ||
+        initialSection === 'artists')
+    ) {
+      return initialDeepLink.itemId;
+    }
+    return null;
+  });
 
   // Remembered sort state
   const [rememberSort, setRememberSort] = useState<'desc' | 'asc'>('desc');
@@ -199,6 +315,156 @@ export default function ResponsiveArchiveShell({
     return () => clearTimeout(t);
   }, [toastMsg]);
 
+  useEffect(() => {
+    if (!copiedLinkKey) return;
+    const t = setTimeout(() => setCopiedLinkKey(null), 1600);
+    return () => clearTimeout(t);
+  }, [copiedLinkKey]);
+
+  // Scroll deep-linked Photo, Memorial, Artist, or Auction card smoothly into view on initial load
+  const initialSpotlightScrolledRef = React.useRef(false);
+  useEffect(() => {
+    if (initialSpotlightScrolledRef.current || !spotlightItemId) return;
+    initialSpotlightScrolledRef.current = true;
+    const raf = window.requestAnimationFrame(() => {
+      const el = document.getElementById(`archive-item-${spotlightItemId}`);
+      el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+    return () => window.cancelAnimationFrame(raf);
+  }, [spotlightItemId]);
+
+  // Silent live address-bar synchronization (250ms debounced + __NA bypass so Next.js AppRouter never fires RSC transitions)
+  const currentAudioTrackId = audioEngine.currentTrack?.id || '';
+  const pausedAudioCueSec = !audioEngine.isPlaying
+    ? Math.floor(audioEngine.currentPlayheadSec)
+    : 0;
+  const syncSignature = `${activeTab}|${selectedVidId}|${vidSeekSeconds}|${currentAudioTrackId}|${pausedAudioCueSec}|${calActiveMonth}|${calActiveEventId || ''}|${spotlightItemId || ''}`;
+  const initialSyncSignatureRef = React.useRef(syncSignature);
+  const userChangedSelectionRef = React.useRef(false);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (syncSignature !== initialSyncSignatureRef.current) {
+      userChangedSelectionRef.current = true;
+    }
+    // Keep clean "/" untouched on initial arrival until the visitor actually switches tabs/items
+    if (!userChangedSelectionRef.current && window.location.search === '') {
+      return;
+    }
+
+    let nextPath = buildArchiveQueryPath({ tab: activeTab });
+    if (activeTab === 'videos') {
+      nextPath = buildArchiveQueryPath({
+        tab: 'videos',
+        item: selectedVidId || null,
+        t: vidSeekSeconds > 0 ? vidSeekSeconds : null,
+      });
+    } else if (activeTab === 'audio') {
+      nextPath = buildArchiveQueryPath({
+        tab: 'audio',
+        item: currentAudioTrackId || null,
+        t: pausedAudioCueSec > 0 ? pausedAudioCueSec : null,
+      });
+    } else if (activeTab === 'calendar') {
+      nextPath = buildArchiveQueryPath({
+        tab: 'calendar',
+        month: calActiveMonth || null,
+        item: calActiveEventId || null,
+      });
+    } else if (
+      (activeTab === 'photos' ||
+        activeTab === 'remembered' ||
+        activeTab === 'auction' ||
+        activeTab === 'artists') &&
+      spotlightItemId
+    ) {
+      nextPath = buildArchiveQueryPath({
+        tab: activeTab,
+        item: spotlightItemId,
+      });
+    }
+
+    const timerId = window.setTimeout(() => {
+      const currentFull = `${window.location.pathname}${window.location.search}`;
+      if (currentFull !== nextPath) {
+        const baseState =
+          window.history.state && typeof window.history.state === 'object'
+            ? (window.history.state as Record<string, unknown>)
+            : {};
+        window.history.replaceState({ ...baseState, __NA: true }, '', nextPath);
+      }
+    }, 250);
+
+    return () => window.clearTimeout(timerId);
+  }, [
+    syncSignature,
+    activeTab,
+    selectedVidId,
+    vidSeekSeconds,
+    currentAudioTrackId,
+    pausedAudioCueSec,
+    calActiveMonth,
+    calActiveEventId,
+    spotlightItemId,
+  ]);
+
+  const copyShareLink = async (params: {
+    tab: PublicArchiveSection;
+    item?: string;
+    t?: number;
+    month?: string;
+    key: string;
+  }) => {
+    if (typeof window === 'undefined') return;
+    userChangedSelectionRef.current = true;
+    const relativePath = buildArchiveQueryPath({
+      tab: params.tab,
+      item: params.item || null,
+      t: params.t && params.t > 0 ? params.t : null,
+      month: params.month || null,
+    });
+    const fullUrl = `${window.location.origin}${relativePath}`;
+
+    let copiedOk = false;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(fullUrl);
+        copiedOk = true;
+      }
+    } catch {
+      copiedOk = false;
+    }
+
+    if (!copiedOk) {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = fullUrl;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        ta.remove();
+        copiedOk = true;
+      } catch {
+        copiedOk = false;
+      }
+    }
+
+    const baseState =
+      window.history.state && typeof window.history.state === 'object'
+        ? (window.history.state as Record<string, unknown>)
+        : {};
+    window.history.replaceState({ ...baseState, __NA: true }, '', relativePath);
+    setCopiedLinkKey(params.key);
+    showToast(
+      copiedOk
+        ? `COPIED LINK · ${relativePath.slice(1)}`
+        : `SHARE URL · ${relativePath.slice(1)}`
+    );
+  };
+
   // Apply season & contrast attributes to <html> (synchronizing .dark, data-theme, and data-contrast)
   useEffect(() => {
     document.documentElement.setAttribute(
@@ -219,11 +485,13 @@ export default function ResponsiveArchiveShell({
     }
   }, [contrast]);
 
-  // Sync admin posture & site settings silently on mount or session change
+  // Sync admin posture via in-memory Bearer token only when needed (SSR already hydrated cookie auth & siteSettings)
   useEffect(() => {
+    if (!memoryToken || isAdminAuthenticated) return;
     adminFetch('/api/admin/auth')
-      .then((r) => r.json())
+      .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
+        if (!data) return;
         setAdminAuth(Boolean(data.authenticated));
         if (data.siteSettings) {
           setSiteSettings(data.siteSettings);
@@ -232,18 +500,42 @@ export default function ResponsiveArchiveShell({
       .catch(() => {
         // Silent ignore
       });
-  }, [memoryToken]);
+  }, [memoryToken, isAdminAuthenticated]);
 
-  // Hostinger-safe 8s conditional HTTP poller (runs only when Scene Room or Auctions is active)
+  // Hostinger-safe conditional HTTP poller with 429 backoff (runs only when Scene Room or Auctions is active)
   useEffect(() => {
     if (!dockOpen && activeTab !== 'auction') return;
 
     let cancelled = false;
+    let timeoutId: number | undefined;
+    let nextDelayMs = 15000;
+
+    const scheduleNext = (delayMs: number) => {
+      if (cancelled) return;
+      timeoutId = window.setTimeout(() => {
+        void pollSnapshot();
+      }, delayMs);
+    };
+
     const pollSnapshot = async () => {
-      if (document.visibilityState !== 'visible') return;
+      if (cancelled) return;
+      if (document.visibilityState !== 'visible') {
+        scheduleNext(nextDelayMs);
+        return;
+      }
       try {
         const res = await fetch('/api/archive?poll=1', { cache: 'no-store' });
-        if (!res.ok) return;
+        if (res.status === 429) {
+          nextDelayMs = Math.min(120000, nextDelayMs * 2);
+          scheduleNext(nextDelayMs);
+          return;
+        }
+        if (!res.ok) {
+          nextDelayMs = Math.min(60000, Math.round(nextDelayMs * 1.5));
+          scheduleNext(nextDelayMs);
+          return;
+        }
+        nextDelayMs = 15000;
         const data = await res.json();
         if (cancelled || !data.ok) return;
         if (Array.isArray(data.sceneChat)) {
@@ -253,23 +545,26 @@ export default function ResponsiveArchiveShell({
           setAuctions(data.auctions);
         }
       } catch {
-        // Silent network ignore
+        nextDelayMs = Math.min(60000, Math.round(nextDelayMs * 1.5));
       }
+      scheduleNext(nextDelayMs);
     };
 
-    void pollSnapshot();
-    const timer = window.setInterval(() => {
-      void pollSnapshot();
-    }, 8000);
+    scheduleNext(nextDelayMs);
 
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      if (timeoutId !== undefined) {
+        window.clearTimeout(timeoutId);
+      }
     };
   }, [dockOpen, activeTab]);
 
   const switchSection = (next: PublicArchiveSection) => {
     setMobileMoreOpen(false);
+    if (next !== activeTab) {
+      setSpotlightItemId(null);
+    }
     runViewTransition(() => {
       setActiveTab(next);
     });
@@ -765,6 +1060,7 @@ export default function ResponsiveArchiveShell({
           <div className="flex justify-end mb-2">
             <Link
               href={`/admin/editor/${encodeURIComponent(slotSlug)}`}
+              prefetch={false}
               className="typo-action typo-action-accent"
             >
               <span>Edit Slot ({slotSlug})</span>
@@ -772,12 +1068,7 @@ export default function ResponsiveArchiveShell({
             </Link>
           </div>
         )}
-        {hasBlocks && slot && (
-          <Render
-            config={puckConfig}
-            data={slot.puckData as unknown as Data<ArchivePuckProps>}
-          />
-        )}
+        {hasBlocks && slot && <PuckStaticRenderer data={slot.puckData} />}
       </div>
     );
   };
@@ -792,17 +1083,19 @@ export default function ResponsiveArchiveShell({
       <audio
         ref={primaryAudioRef}
         src={audioEngine.resolvedStreamSrc || undefined}
-        preload="auto"
+        preload={audioEngine.hasActivatedSession ? 'metadata' : 'none'}
         onTimeUpdate={audioEngine.onAudioTimeUpdate}
         onEnded={audioEngine.onAudioEnded}
       />
-      {audioEngine.preloadNextSrc && (
-        <audio
-          src={audioEngine.preloadNextSrc}
-          preload="auto"
-          className="hidden"
-        />
-      )}
+      {audioEngine.hasActivatedSession &&
+        audioEngine.isPlaying &&
+        audioEngine.preloadNextSrc && (
+          <audio
+            src={audioEngine.preloadNextSrc}
+            preload="metadata"
+            className="hidden"
+          />
+        )}
 
       {/* ==================== CLEAN 2-ZONE SPECULAR FROSTED MASTHEAD ==================== */}
       <header className="masthead">
@@ -961,6 +1254,7 @@ export default function ResponsiveArchiveShell({
           <div className="border-t border-[var(--grid-hairline-strong)]">
             <Link
               href="/admin"
+              prefetch={false}
               className="nav-btn text-xs text-[var(--ink-mono)] hover:text-[var(--ink-primary)]"
             >
               <span className="inline-flex items-center gap-2">
@@ -1015,7 +1309,7 @@ export default function ResponsiveArchiveShell({
                       {vidLiveEmbedMode ? (
                         <iframe
                           title={activeVideo.title}
-                          src={`https://www.youtube-nocookie.com/embed/${activeVideo.youtubeUnlistedId}?start=${vidSeekSeconds}&rel=0&modestbranding=1`}
+                          src={`https://www.youtube-nocookie.com/embed/${activeVideo.youtubeUnlistedId}?start=${vidSeekSeconds}&autoplay=1&rel=0&modestbranding=1`}
                           sandbox="allow-scripts allow-same-origin allow-presentation"
                           loading="lazy"
                           allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture"
@@ -1048,47 +1342,97 @@ export default function ResponsiveArchiveShell({
 
                     <div className="lg:col-span-5 flex flex-col justify-between gap-3">
                       <div className="flex justify-between items-start gap-2">
-                        <div>
+                        <div className="min-w-0">
                           <div className="font-mono text-xs text-[var(--mute)] mb-1 tabular-nums">
                             {activeVideo.venue} · {activeVideo.recordedDate} ·{' '}
                             {activeVideo.filmer}
                           </div>
-                          <h3 className="m-0 text-base sm:text-lg font-bold tracking-tight text-balance">
+                          <h3 className="plate-title m-0 text-base sm:text-lg text-balance">
                             {activeVideo.title}
                           </h3>
                         </div>
-                        {vidLiveEmbedMode && (
+                        <div className="inline-flex items-center gap-2 shrink-0">
                           <button
                             type="button"
-                            className="typo-action shrink-0"
-                            onClick={() => setVidLiveEmbedMode(false)}
+                            onClick={() =>
+                              void copyShareLink({
+                                tab: 'videos',
+                                item: activeVideo.id,
+                                t: vidSeekSeconds > 0 ? vidSeekSeconds : undefined,
+                                key: `vid-stage:${activeVideo.id}`,
+                              })
+                            }
+                            className={`btn-arch !py-1 !px-2.5 !text-[10.5px] font-mono tabular-nums whitespace-nowrap ${
+                              copiedLinkKey === `vid-stage:${activeVideo.id}`
+                                ? 'active'
+                                : ''
+                            }`}
                           >
-                            Poster
+                            {copiedLinkKey === `vid-stage:${activeVideo.id}`
+                              ? '[ COPIED ]'
+                              : '[ COPY LINK ]'}
                           </button>
-                        )}
+                          {vidLiveEmbedMode && (
+                            <button
+                              type="button"
+                              className="typo-action shrink-0"
+                              onClick={() => setVidLiveEmbedMode(false)}
+                            >
+                              Poster
+                            </button>
+                          )}
+                        </div>
                       </div>
 
                       <div className="flex flex-col mt-1 border-t border-[var(--glass-border)]">
                         {activeVideo.timestamps.map((ts) => {
-                          const isCurrent = vidSeekText.startsWith(ts.time);
+                          const isCurrent = vidSeekSeconds === ts.sec;
+                          const rowKey = `vid-ts:${activeVideo.id}:${ts.sec}`;
                           return (
-                            <button
-                              key={ts.time}
-                              type="button"
-                              aria-pressed={isCurrent}
-                              className={`chapter-trigger tabular-nums ${
+                            <div
+                              key={`${ts.time}-${ts.sec}`}
+                              className={`chapter-row ${
                                 isCurrent ? 'active' : ''
                               }`}
-                              onClick={() => {
-                                setVidSeekText(`${ts.time} — ${ts.label}`);
-                                setVidSeekSeconds(ts.sec);
-                              }}
                             >
-                              <span className="chapter-time shrink-0 font-semibold">
-                                {ts.time}
-                              </span>
-                              <span className="truncate">{ts.label}</span>
-                            </button>
+                              <button
+                                type="button"
+                                aria-pressed={isCurrent}
+                                className={`chapter-trigger tabular-nums ${
+                                  isCurrent ? 'active' : ''
+                                }`}
+                                onClick={() => {
+                                  setVidSeekText(`${ts.time} — ${ts.label}`);
+                                  setVidSeekSeconds(ts.sec);
+                                }}
+                              >
+                                <span className="chapter-time shrink-0 font-semibold">
+                                  {ts.time}
+                                </span>
+                                <span className="truncate">{ts.label}</span>
+                              </button>
+                              <button
+                                type="button"
+                                title={`Copy link to ${ts.time} — ${ts.label}`}
+                                onClick={() => {
+                                  setVidSeekText(`${ts.time} — ${ts.label}`);
+                                  setVidSeekSeconds(ts.sec);
+                                  void copyShareLink({
+                                    tab: 'videos',
+                                    item: activeVideo.id,
+                                    t: ts.sec > 0 ? ts.sec : undefined,
+                                    key: rowKey,
+                                  });
+                                }}
+                                className={`btn-arch !py-0.5 !px-2 !text-[10px] font-mono tabular-nums whitespace-nowrap shrink-0 ${
+                                  copiedLinkKey === rowKey ? 'active' : ''
+                                }`}
+                              >
+                                {copiedLinkKey === rowKey
+                                  ? '[ COPIED ]'
+                                  : '[ COPY LINK ]'}
+                              </button>
+                            </div>
                           );
                         })}
                       </div>
@@ -1196,6 +1540,8 @@ export default function ResponsiveArchiveShell({
               onAddComment={postCommentApi}
               onVoteComment={voteCommentApi}
               onReplyComment={replyCommentApi}
+              onCopyShareLink={(p) => void copyShareLink(p)}
+              copiedLinkKey={copiedLinkKey}
               searchSlot={renderSearchAndTags(
                 'audio',
                 'Filter Lossless Recordings by Band or Venue',
@@ -1234,27 +1580,59 @@ export default function ResponsiveArchiveShell({
                 ['poe-mill', 'the-barn', 'velo-fellow', '35mm', 'skate']
               )}
               <div className="brutal-grid-photos">
-                {filteredPhotos.map((p, pIdx) => (
-                  <article key={p.id} className="arch-plate">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={p.imageUrl}
-                      alt={p.title}
-                      referrerPolicy="no-referrer"
-                      className="thumb-3x2"
-                      loading="lazy"
-                    />
-                    <div className="card-pad">
-                      <div className="font-mono text-[11px] text-[var(--ink-mono)] tabular-nums">
-                        {String(pIdx + 1).padStart(2, '0')} · {p.venue} ·{' '}
-                        {p.year} · {p.photographer}
+                {filteredPhotos.map((p, pIdx) => {
+                  const isSpot = spotlightItemId === p.id;
+                  const copyKey = `pho:${p.id}`;
+                  return (
+                    <article
+                      key={p.id}
+                      id={`archive-item-${p.id}`}
+                      onClick={() => setSpotlightItemId(p.id)}
+                      className={`arch-plate cursor-pointer ${
+                        isSpot ? 'is-selected' : ''
+                      }`}
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={p.imageUrl}
+                        alt={p.title}
+                        referrerPolicy="no-referrer"
+                        className="thumb-3x2"
+                        loading="lazy"
+                      />
+                      <div className="card-pad flex flex-col gap-2">
+                        <div className="font-mono text-[11px] text-[var(--ink-mono)] tabular-nums">
+                          {String(pIdx + 1).padStart(2, '0')} · {p.venue} ·{' '}
+                          {p.year} · {p.photographer}
+                        </div>
+                        <div className="flex items-end justify-between gap-2">
+                          <h3 className="m-0 text-sm font-bold leading-snug text-balance">
+                            {p.title}
+                          </h3>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSpotlightItemId(p.id);
+                              void copyShareLink({
+                                tab: 'photos',
+                                item: p.id,
+                                key: copyKey,
+                              });
+                            }}
+                            className={`btn-arch !py-1 !px-2 !text-[10px] font-mono tabular-nums whitespace-nowrap shrink-0 ${
+                              copiedLinkKey === copyKey ? 'active' : ''
+                            }`}
+                          >
+                            {copiedLinkKey === copyKey
+                              ? '[ COPIED ]'
+                              : '[ COPY LINK ]'}
+                          </button>
+                        </div>
                       </div>
-                      <h3 className="mt-1.5 mb-0 text-sm font-bold leading-snug text-balance">
-                        {p.title}
-                      </h3>
-                    </div>
-                  </article>
-                ))}
+                    </article>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -1329,22 +1707,28 @@ export default function ResponsiveArchiveShell({
             <MonthFlyerCalendar
               events={calendarEvents}
               submissionEmail={siteSettings.calendarSubmissionEmail}
+              initialMonthKey={
+                initialSection === 'calendar'
+                  ? initialDeepLink?.monthKey
+                  : undefined
+              }
+              initialEventId={
+                initialSection === 'calendar'
+                  ? initialDeepLink?.itemId
+                  : undefined
+              }
+              onSelectionChange={(mKey, evId) => {
+                setCalActiveMonth(mKey);
+                setCalActiveEventId(evId);
+              }}
+              onCopyShareLink={(p) => void copyShareLink(p)}
+              copiedLinkKey={copiedLinkKey}
             />
           )}
 
           {/* ==================== 6. TIMELINE VIEW ==================== */}
           {activeTab === 'timeline' && (
-            <div>
-              <div className="sec-head">
-                <div>
-                  <div className="sec-kicker">
-                    Scene History · Greenville DIY
-                  </div>
-                  <h2 className="sec-title">Timeline</h2>
-                </div>
-              </div>
-              <TactilePortholeTimeline eras={timelineEras} />
-            </div>
+            <TactilePortholeTimeline eras={timelineEras} />
           )}
 
           {/* ==================== 7. PLACES TO REMEMBER VIEW ==================== */}
@@ -1377,30 +1761,60 @@ export default function ResponsiveArchiveShell({
                 ['velo-fellow', 'skate', 'west-end', 'venue']
               )}
               <div className="memorial-stack">
-                {sortedRemembered.map((p, rIdx) => (
-                  <article key={p.id} className="memorial-block anim-in">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={p.imageUrl}
-                      alt={p.name}
-                      referrerPolicy="no-referrer"
-                      className="memorial-img"
-                      loading="lazy"
-                    />
-                    <div className="memorial-body">
-                      <div className="font-mono text-[11px] text-[var(--ink-mono)] tabular-nums">
-                        {String(rIdx + 1).padStart(2, '0')} ·{' '}
-                        {p.closedDisplayLabel} · {p.location}
+                {sortedRemembered.map((p, rIdx) => {
+                  const isSpot = spotlightItemId === p.id;
+                  const copyKey = `rem:${p.id}`;
+                  return (
+                    <article
+                      key={p.id}
+                      id={`archive-item-${p.id}`}
+                      onClick={() => setSpotlightItemId(p.id)}
+                      className={`memorial-block anim-in cursor-pointer ${
+                        isSpot ? 'is-selected' : ''
+                      }`}
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={p.imageUrl}
+                        alt={p.name}
+                        referrerPolicy="no-referrer"
+                        className="memorial-img"
+                        loading="lazy"
+                      />
+                      <div className="memorial-body">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="font-mono text-[11px] text-[var(--ink-mono)] tabular-nums">
+                            {String(rIdx + 1).padStart(2, '0')} ·{' '}
+                            {p.closedDisplayLabel} · {p.location}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSpotlightItemId(p.id);
+                              void copyShareLink({
+                                tab: 'remembered',
+                                item: p.id,
+                                key: copyKey,
+                              });
+                            }}
+                            className={`btn-arch !py-1 !px-2.5 !text-[10.5px] font-mono tabular-nums whitespace-nowrap shrink-0 ${
+                              copiedLinkKey === copyKey ? 'active' : ''
+                            }`}
+                          >
+                            {copiedLinkKey === copyKey
+                              ? '[ COPIED ]'
+                              : '[ COPY LINK ]'}
+                          </button>
+                        </div>
+                        <h3 className="plate-title m-0 text-lg">{p.name}</h3>
+                        <p className="m-0 text-sm text-[var(--ink-2)] leading-relaxed">
+                          {p.memorialStory}
+                        </p>
                       </div>
-                      <h3 className="m-0 font-[var(--font-display)] text-lg font-extrabold tracking-tight">
-                        {p.name}
-                      </h3>
-                      <p className="m-0 text-sm text-[var(--ink-2)] leading-relaxed">
-                        {p.memorialStory}
-                      </p>
-                    </div>
-                  </article>
-                ))}
+                    </article>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -1450,8 +1864,10 @@ export default function ResponsiveArchiveShell({
                   const safeIgHref = sanitizeSafeHref(a.igPermalink);
                   const isExternalIg =
                     safeIgHref !== null && /^https?:\/\//i.test(safeIgHref);
+                  const isSpot = spotlightItemId === a.id;
+                  const copyKey = `auc:${a.id}`;
 
-                  const cardInner = (
+                  const mediaAndHeading = (
                     <>
                       <div className="relative">
                         {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -1470,22 +1886,77 @@ export default function ResponsiveArchiveShell({
                           {a.sold ? 'SOLD' : 'LIVE · 0% FEE'}
                         </span>
                       </div>
-                      <div className="card-pad">
+                      <div className="px-4 pt-3.5 pb-2">
                         <div className="font-mono text-[11px] text-[var(--ink-mono)]">
                           @{a.ownerUsername.replace(/^@/, '')} · {a.pickupArea}
                         </div>
-                        <h3 className="mt-1.5 mb-2 text-sm font-bold leading-snug text-[var(--ink-primary)] text-balance">
+                        <h3 className="mt-1.5 mb-0 text-sm font-bold leading-snug text-[var(--ink-primary)] text-balance">
                           {a.title}
                         </h3>
-                        <div className="flex items-center justify-between gap-2 pt-2 border-t border-[var(--grid-hairline)]">
-                          <span className="font-mono text-xs font-bold text-[var(--accent)] tabular-nums">
-                            {a.currentBidLabel}
-                          </span>
+                      </div>
+                    </>
+                  );
+
+                  return (
+                    <article
+                      key={a.id}
+                      id={`archive-item-${a.id}`}
+                      onClick={() => setSpotlightItemId(a.id)}
+                      className={`arch-plate group ${
+                        isSpot ? 'is-selected' : ''
+                      }`}
+                    >
+                      {safeIgHref ? (
+                        <a
+                          href={safeIgHref}
+                          target={isExternalIg ? '_blank' : undefined}
+                          rel={isExternalIg ? 'noopener noreferrer' : undefined}
+                          className="block text-inherit hover:no-underline"
+                        >
+                          {mediaAndHeading}
+                        </a>
+                      ) : (
+                        <div className="block text-inherit">
+                          {mediaAndHeading}
+                        </div>
+                      )}
+
+                      <div className="px-4 pb-3.5 pt-2 mt-auto flex flex-wrap items-center justify-between gap-2 border-t border-[var(--grid-hairline)]">
+                        <span className="font-mono text-xs font-bold text-[var(--accent)] tabular-nums">
+                          {a.currentBidLabel}
+                        </span>
+                        <div className="inline-flex items-center gap-2.5">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSpotlightItemId(a.id);
+                              void copyShareLink({
+                                tab: 'auction',
+                                item: a.id,
+                                key: copyKey,
+                              });
+                            }}
+                            className={`btn-arch !py-1 !px-2 !text-[10px] font-mono tabular-nums whitespace-nowrap ${
+                              copiedLinkKey === copyKey ? 'active' : ''
+                            }`}
+                          >
+                            {copiedLinkKey === copyKey
+                              ? '[ COPIED ]'
+                              : '[ COPY LINK ]'}
+                          </button>
                           {safeIgHref ? (
-                            <span className="typo-action typo-action-accent !py-0">
+                            <a
+                              href={safeIgHref}
+                              target={isExternalIg ? '_blank' : undefined}
+                              rel={
+                                isExternalIg ? 'noopener noreferrer' : undefined
+                              }
+                              className="typo-action typo-action-accent !py-0"
+                            >
                               <span>{a.sold ? 'View Post' : 'Bid on IG'}</span>
                               <ArrowUpRight className="w-3.5 h-3.5" />
-                            </span>
+                            </a>
                           ) : (
                             <span className="typo-action !py-0 opacity-50 cursor-not-allowed select-none">
                               Link Unavailable
@@ -1493,25 +1964,6 @@ export default function ResponsiveArchiveShell({
                           )}
                         </div>
                       </div>
-                    </>
-                  );
-
-                  return (
-                    <article key={a.id} className="arch-plate group">
-                      {safeIgHref ? (
-                        <a
-                          href={safeIgHref}
-                          target={isExternalIg ? '_blank' : undefined}
-                          rel={isExternalIg ? 'noopener noreferrer' : undefined}
-                          className="block text-inherit hover:no-underline h-full"
-                        >
-                          {cardInner}
-                        </a>
-                      ) : (
-                        <div className="block text-inherit h-full">
-                          {cardInner}
-                        </div>
-                      )}
                     </article>
                   );
                 })}
@@ -1569,6 +2021,7 @@ export default function ResponsiveArchiveShell({
             </button>
             <Link
               href="/admin"
+              prefetch={false}
               className="btn-arch col-span-2 min-h-[44px] justify-between"
               onClick={() => setMobileMoreOpen(false)}
             >

@@ -222,7 +222,7 @@ export async function GET(
               'Content-Length': String(chunk.byteLength),
               'Content-Range': `bytes ${start}-${end}/${total}`,
               'Accept-Ranges': 'bytes',
-              'Cache-Control': 'no-store',
+              'Cache-Control': 'private, max-age=300',
             },
           });
         }
@@ -233,7 +233,7 @@ export async function GET(
             'Content-Type': 'audio/wav',
             'Content-Length': String(total),
             'Accept-Ranges': 'bytes',
-            'Cache-Control': 'no-store',
+            'Cache-Control': 'private, max-age=300',
           },
         });
       }
@@ -243,7 +243,7 @@ export async function GET(
         status: 200,
         headers: {
           'Content-Type': 'image/svg+xml; charset=utf-8',
-          'Cache-Control': 'no-store',
+          'Cache-Control': 'private, max-age=300',
         },
       });
     }

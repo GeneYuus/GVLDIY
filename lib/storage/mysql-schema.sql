@@ -226,5 +226,24 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   target_id VARCHAR(128) NULL,
   ip_hash CHAR(64) NULL,
   details_json JSON NULL,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_audit_action (action_name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Pass 10: RFC 6238 TOTP MFA Persistence & Relational Comment Vote Deduplication
+CREATE TABLE IF NOT EXISTS admin_mfa_config (
+  id TINYINT PRIMARY KEY DEFAULT 1,
+  enabled TINYINT(1) NOT NULL DEFAULT 0,
+  encrypted_secret TEXT NULL,
+  pending_encrypted_secret TEXT NULL,
+  last_accepted_step BIGINT NULL,
+  recovery_hashes_json TEXT NULL,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS comment_votes (
+  comment_id VARCHAR(64) NOT NULL,
+  ip_hash CHAR(64) NOT NULL,
+  created_at_iso VARCHAR(40) NOT NULL,
+  PRIMARY KEY (comment_id, ip_hash)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

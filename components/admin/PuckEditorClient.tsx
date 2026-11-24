@@ -85,7 +85,7 @@ export default function PuckEditorClient({ page }: PuckEditorClientProps) {
     <div className="min-h-screen flex flex-col bg-[var(--bg)] text-[var(--ink)]">
       <div className="masthead z-20">
         <div className="flex items-center gap-3 min-w-0">
-          <Link href="/admin" className="typo-action shrink-0">
+          <Link href="/admin" prefetch={false} className="typo-action shrink-0">
             <ArrowLeft className="w-3.5 h-3.5" />
             <span>Admin Manager</span>
           </Link>
@@ -112,6 +112,7 @@ export default function PuckEditorClient({ page }: PuckEditorClientProps) {
           )}
           <Link
             href={liveHref}
+            prefetch={false}
             target="_blank"
             rel="noopener noreferrer"
             className="typo-action typo-action-accent"

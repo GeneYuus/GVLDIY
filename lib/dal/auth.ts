@@ -13,7 +13,23 @@ import {
   isPreviewDemoUnlockAllowed,
   validateProductionAuthConfig,
 } from '@/lib/config/runtimeEnv';
-import { getInitializedMysqlPool } from '@/lib/storage/repository';
+import {
+  buildTotpOtpauthUri,
+  decryptTotpSecret,
+  encryptTotpSecret,
+  formatBase32ManualKey,
+  generateBackupRecoveryCodes,
+  generateTotpSecretBase32,
+  getEnvTotpFallbackSecret,
+  renderTotpQrSvgDataUri,
+  verifyRecoveryCodeConstantTime,
+  verifyTotpCode,
+} from '@/lib/security/totp';
+import {
+  archiveRepository,
+  getInitializedMysqlPool,
+} from '@/lib/storage/repository';
+import type { AdminMfaStatusSnapshot } from '@/types/archive';
 
 const PREVIEW_COOKIE_NAME = 'gvl_diy_admin_session';
 const PROD_HOST_COOKIE_NAME = '__Host-gvl_diy_admin_session';
@@ -26,9 +42,15 @@ const SCRYPT_MAXMEM = 134217728; // 128 MiB ceiling for N=65536, r=8, p=2 (~64 M
 const MAX_CONCURRENT_SCRYPT = 2;
 
 const SESSION_TTL_MS = 1000 * 60 * 60 * 12; // 12 hours
-const RATE_WINDOW_MS = 1000 * 60 * 15; // 15 minutes
+const RATE_WINDOW_MS = 1000 * 60 * 15; // 15 minutes per-IP strike window
 const MAX_FAILED_ATTEMPTS = 5;
 const FAILED_LOGIN_FLOOR_MS = 450;
+
+const GLOBAL_BURST_BUCKET_KEY = 'global:admin';
+const GLOBAL_BURST_WINDOW_MS = 60_000; // 60 seconds burst window
+const GLOBAL_BURST_MAX_PER_MIN = 20; // > 20 failures/min triggers 30s burst shield
+const GLOBAL_BURST_COOLDOWN_MS = 30_000; // 30 seconds 429 cooldown
+const GLOBAL_BURST_FLOOR_MS = 1_000; // 1,000ms response delay under burst
 
 interface AdminSessionRecord {
   sessionIdHash: string;
@@ -401,85 +423,135 @@ async function saveRateLimitBucket(record: AuthRateLimitRecord): Promise<void> {
 export async function checkAuthRateLimit(ipHash: string): Promise<{
   allowed: boolean;
   retryAfterSec: number;
+  isGlobalBurst: boolean;
+  minDelayMs: number;
 }> {
   const now = Date.now();
-  const [ipBucket, globalBucket] = await Promise.all([
-    loadRateLimitBucket(ipHash),
-    loadRateLimitBucket('global:admin'),
-  ]);
 
-  const maxLockedUntil = Math.max(
-    ipBucket.lockedUntilMs || 0,
-    globalBucket.lockedUntilMs || 0
-  );
-
-  if (maxLockedUntil > now) {
+  // 1. Per-IP progressive lockout (15m / 1h / 24h) — strictly isolated per ipHash
+  const ipBucket = await loadRateLimitBucket(ipHash);
+  if ((ipBucket.lockedUntilMs || 0) > now) {
     return {
       allowed: false,
-      retryAfterSec: Math.max(1, Math.ceil((maxLockedUntil - now) / 1000)),
+      retryAfterSec: Math.max(1, Math.ceil((ipBucket.lockedUntilMs - now) / 1000)),
+      isGlobalBurst: false,
+      minDelayMs: FAILED_LOGIN_FLOOR_MS,
     };
   }
 
-  return { allowed: true, retryAfterSec: 0 };
+  // 2. Global 60s burst guard (> 20 global failures/min -> 30s 429 + 1,000ms delay)
+  const globalBucket = await loadRateLimitBucket(GLOBAL_BURST_BUCKET_KEY);
+  if ((globalBucket.lockedUntilMs || 0) > now) {
+    return {
+      allowed: false,
+      retryAfterSec: Math.max(
+        1,
+        Math.ceil((globalBucket.lockedUntilMs - now) / 1000)
+      ),
+      isGlobalBurst: true,
+      minDelayMs: GLOBAL_BURST_FLOOR_MS,
+    };
+  }
+
+  return {
+    allowed: true,
+    retryAfterSec: 0,
+    isGlobalBurst: false,
+    minDelayMs: FAILED_LOGIN_FLOOR_MS,
+  };
 }
 
 export async function recordFailedAuthAttempt(ipHash: string): Promise<{
   lockedNow: boolean;
+  globalBurstNow: boolean;
   retryAfterSec: number;
+  minDelayMs: number;
 }> {
   const now = Date.now();
   const nowIso = new Date().toISOString();
-  const keys = [ipHash, 'global:admin'];
-  let maxLockedUntil = 0;
 
-  for (const key of keys) {
-    const current = await loadRateLimitBucket(key);
-    const windowExpired =
-      current.windowStartMs === 0 || now - current.windowStartMs > RATE_WINDOW_MS;
-    const nextFailCount = windowExpired ? 1 : current.failCount + 1;
-    const nextWindowStart = windowExpired ? now : current.windowStartMs;
+  // 1. Update per-IP progressive strike bucket exclusively for this ipHash
+  const currentIp = await loadRateLimitBucket(ipHash);
+  const ipWindowExpired =
+    currentIp.windowStartMs === 0 || now - currentIp.windowStartMs > RATE_WINDOW_MS;
+  const nextIpFailCount = ipWindowExpired ? 1 : currentIp.failCount + 1;
+  const nextIpWindowStart = ipWindowExpired ? now : currentIp.windowStartMs;
 
-    let nextStrike = current.strikeLevel;
-    let nextLockedUntil = current.lockedUntilMs > now ? current.lockedUntilMs : 0;
+  let nextStrike = currentIp.strikeLevel;
+  let nextIpLockedUntil =
+    currentIp.lockedUntilMs > now ? currentIp.lockedUntilMs : 0;
 
-    if (nextFailCount >= MAX_FAILED_ATTEMPTS) {
-      nextStrike = Math.min(10, current.strikeLevel + 1);
-      nextLockedUntil = now + cooldownMsForStrike(nextStrike);
-    }
-
-    maxLockedUntil = Math.max(maxLockedUntil, nextLockedUntil);
-
-    await saveRateLimitBucket({
-      bucketKey: key,
-      failCount: nextFailCount >= MAX_FAILED_ATTEMPTS ? 0 : nextFailCount,
-      windowStartMs: nextFailCount >= MAX_FAILED_ATTEMPTS ? 0 : nextWindowStart,
-      strikeLevel: nextStrike,
-      lockedUntilMs: nextLockedUntil,
-      updatedAtIso: nowIso,
-    });
+  if (nextIpFailCount >= MAX_FAILED_ATTEMPTS) {
+    nextStrike = Math.min(10, currentIp.strikeLevel + 1);
+    nextIpLockedUntil = now + cooldownMsForStrike(nextStrike);
   }
 
-  const lockedNow = maxLockedUntil > now;
+  await saveRateLimitBucket({
+    bucketKey: ipHash,
+    failCount: nextIpFailCount >= MAX_FAILED_ATTEMPTS ? 0 : nextIpFailCount,
+    windowStartMs:
+      nextIpFailCount >= MAX_FAILED_ATTEMPTS ? 0 : nextIpWindowStart,
+    strikeLevel: nextStrike,
+    lockedUntilMs: nextIpLockedUntil,
+    updatedAtIso: nowIso,
+  });
+
+  // 2. Update global:admin 60s burst guard (never escalates to 15m/1h/24h lockouts)
+  const currentGlobal = await loadRateLimitBucket(GLOBAL_BURST_BUCKET_KEY);
+  const globalWindowExpired =
+    currentGlobal.windowStartMs === 0 ||
+    now - currentGlobal.windowStartMs > GLOBAL_BURST_WINDOW_MS;
+  const nextGlobalCount = globalWindowExpired ? 1 : currentGlobal.failCount + 1;
+  const nextGlobalWindowStart = globalWindowExpired
+    ? now
+    : currentGlobal.windowStartMs;
+
+  let nextGlobalLockedUntil =
+    currentGlobal.lockedUntilMs > now ? currentGlobal.lockedUntilMs : 0;
+  let globalBurstTriggered = false;
+
+  if (nextGlobalCount > GLOBAL_BURST_MAX_PER_MIN) {
+    nextGlobalLockedUntil = Math.max(
+      nextGlobalLockedUntil,
+      now + GLOBAL_BURST_COOLDOWN_MS
+    );
+    globalBurstTriggered = true;
+  }
+
+  await saveRateLimitBucket({
+    bucketKey: GLOBAL_BURST_BUCKET_KEY,
+    failCount: nextGlobalCount,
+    windowStartMs: nextGlobalWindowStart,
+    strikeLevel: 0,
+    lockedUntilMs: nextGlobalLockedUntil,
+    updatedAtIso: nowIso,
+  });
+
+  const ipLockedNow = nextIpLockedUntil > now;
+  const globalBurstNow = globalBurstTriggered || nextGlobalLockedUntil > now;
+  const effectiveLockUntil = Math.max(nextIpLockedUntil, nextGlobalLockedUntil);
+
   return {
-    lockedNow,
-    retryAfterSec: lockedNow
-      ? Math.max(1, Math.ceil((maxLockedUntil - now) / 1000))
-      : 0,
+    lockedNow: ipLockedNow,
+    globalBurstNow,
+    retryAfterSec:
+      effectiveLockUntil > now
+        ? Math.max(1, Math.ceil((effectiveLockUntil - now) / 1000))
+        : 0,
+    minDelayMs: globalBurstNow ? GLOBAL_BURST_FLOOR_MS : FAILED_LOGIN_FLOOR_MS,
   };
 }
 
 export async function clearAuthFailureCount(ipHash: string): Promise<void> {
   const nowIso = new Date().toISOString();
-  for (const key of [ipHash, 'global:admin']) {
-    await saveRateLimitBucket({
-      bucketKey: key,
-      failCount: 0,
-      windowStartMs: 0,
-      strikeLevel: 0,
-      lockedUntilMs: 0,
-      updatedAtIso: nowIso,
-    });
-  }
+  await saveRateLimitBucket({
+    bucketKey: ipHash,
+    failCount: 0,
+    windowStartMs: 0,
+    strikeLevel: 0,
+    lockedUntilMs: 0,
+    updatedAtIso: nowIso,
+  });
 }
 
 // ==================== REVOCABLE DATABASE-BACKED SESSIONS ====================
@@ -638,6 +710,257 @@ export async function revokeAllAdminSessions(): Promise<number> {
   }
 
   return revokedCount;
+}
+
+/**
+ * Revokes all active sessions EXCEPT the caller's active session token(s),
+ * used when confirming TOTP enrollment so other devices are logged out immediately.
+ */
+export async function revokeOtherAdminSessions(req: Request): Promise<number> {
+  const keepHashes = new Set<string>();
+  const bearer = extractBearerToken(req.headers.get('authorization'));
+  if (bearer && /^[a-f0-9]{64}$/i.test(bearer)) {
+    keepHashes.add(sha256Hex(bearer.toLowerCase()));
+  }
+
+  try {
+    const cookieStore = await cookies();
+    const hostVal = cookieStore.get(PROD_HOST_COOKIE_NAME)?.value;
+    const prevVal = cookieStore.get(PREVIEW_COOKIE_NAME)?.value;
+    for (const v of [hostVal, prevVal]) {
+      if (v && /^[a-f0-9]{64}$/i.test(v)) {
+        keepHashes.add(sha256Hex(v.toLowerCase()));
+      }
+    }
+  } catch {
+    // Ignore outside request cookie context
+  }
+
+  const nowIso = new Date().toISOString();
+  const map = getSessionMap();
+  let revokedCount = 0;
+
+  for (const [hash, rec] of map.entries()) {
+    if (!rec.revokedAtIso && !keepHashes.has(hash)) {
+      rec.revokedAtIso = nowIso;
+      revokedCount += 1;
+    }
+  }
+
+  if (isHostingerMysqlConfigured()) {
+    const pool = await getInitializedMysqlPool().catch(() => null);
+    if (pool) {
+      const keepList = Array.from(keepHashes);
+      if (keepList.length === 0) {
+        const [res] = await pool.query(
+          `UPDATE admin_sessions SET revoked_at_iso = ? WHERE revoked_at_iso IS NULL`,
+          [nowIso]
+        );
+        revokedCount = Math.max(
+          revokedCount,
+          Number((res as { affectedRows?: number })?.affectedRows || 0)
+        );
+      } else {
+        const placeholders = keepList.map(() => '?').join(', ');
+        const [res] = await pool.query(
+          `UPDATE admin_sessions
+           SET revoked_at_iso = ?
+           WHERE revoked_at_iso IS NULL
+             AND session_id_hash NOT IN (${placeholders})`,
+          [nowIso, ...keepList]
+        );
+        revokedCount = Math.max(
+          revokedCount,
+          Number((res as { affectedRows?: number })?.affectedRows || 0)
+        );
+      }
+    }
+  }
+
+  return revokedCount;
+}
+
+// ==================== TWO-FACTOR (RFC 6238 TOTP) ORCHESTRATION ====================
+export async function getAdminMfaStatus(): Promise<AdminMfaStatusSnapshot> {
+  const row = await archiveRepository.getMfaConfigRow();
+  const decryptedDbSecret = row.enabled
+    ? decryptTotpSecret(row.encryptedSecret)
+    : null;
+  const dbEnabled = Boolean(row.enabled && decryptedDbSecret);
+  const envFallbackSecret = getEnvTotpFallbackSecret();
+  const envFallbackConfigured = Boolean(envFallbackSecret);
+
+  const hasPendingSetup = Boolean(
+    decryptTotpSecret(row.pendingEncryptedSecret)
+  );
+
+  // Confirmed user rule: Live enrolled database 2FA overrides ADMIN_TOTP_SECRET env fallback
+  const source: AdminMfaStatusSnapshot['source'] = dbEnabled
+    ? 'database'
+    : envFallbackConfigured
+    ? 'env-fallback'
+    : 'none';
+
+  return {
+    active: dbEnabled || envFallbackConfigured,
+    dbEnabled,
+    envFallbackConfigured,
+    source,
+    hasPendingSetup,
+    remainingRecoveryCodes: dbEnabled ? row.recoveryHashes.length : 0,
+    updatedAtIso: row.updatedAtIso,
+  };
+}
+
+export async function beginAdminTotpEnrollment(): Promise<{
+  qrSvgDataUri: string;
+  manualKeyFormatted: string;
+  otpauthUri: string;
+  mfaStatus: AdminMfaStatusSnapshot;
+}> {
+  const plainSecretBase32 = generateTotpSecretBase32();
+  const encryptedPending = encryptTotpSecret(plainSecretBase32);
+  await archiveRepository.savePendingMfaSecret(encryptedPending);
+
+  const otpauthUri = buildTotpOtpauthUri(plainSecretBase32);
+  const qrSvgDataUri = await renderTotpQrSvgDataUri(otpauthUri);
+  const manualKeyFormatted = formatBase32ManualKey(plainSecretBase32);
+  const mfaStatus = await getAdminMfaStatus();
+
+  return {
+    qrSvgDataUri,
+    manualKeyFormatted,
+    otpauthUri,
+    mfaStatus,
+  };
+}
+
+export async function confirmAdminTotpEnrollment(
+  submittedCode: string,
+  req: Request
+): Promise<
+  | {
+      ok: true;
+      recoveryCodes: string[];
+      revokedOtherSessions: number;
+      mfaStatus: AdminMfaStatusSnapshot;
+    }
+  | { ok: false; error: string; replayBlocked?: boolean }
+> {
+  const row = await archiveRepository.getMfaConfigRow();
+  const pendingPlain = decryptTotpSecret(row.pendingEncryptedSecret);
+  if (!pendingPlain) {
+    return {
+      ok: false,
+      error: 'No pending authenticator setup found. Click Begin Setup first.',
+    };
+  }
+
+  const verification = verifyTotpCode(pendingPlain, submittedCode);
+  if (!verification.valid || verification.matchedStep === null) {
+    return {
+      ok: false,
+      error: 'Invalid 6-digit authenticator code. Check your phone clock and try again.',
+    };
+  }
+
+  if (
+    row.lastAcceptedStep !== null &&
+    verification.matchedStep <= row.lastAcceptedStep
+  ) {
+    return {
+      ok: false,
+      error: 'This 6-digit code was already used. Wait for the next 30-second code.',
+      replayBlocked: true,
+    };
+  }
+
+  const { plainCodes, hashes } = generateBackupRecoveryCodes(8);
+  const promotedEncrypted = encryptTotpSecret(pendingPlain);
+
+  await archiveRepository.promotePendingMfaSecret(
+    promotedEncrypted,
+    verification.matchedStep,
+    hashes
+  );
+  const revokedOtherSessions = await revokeOtherAdminSessions(req);
+  const mfaStatus = await getAdminMfaStatus();
+
+  return {
+    ok: true,
+    recoveryCodes: plainCodes,
+    revokedOtherSessions,
+    mfaStatus,
+  };
+}
+
+export async function verifyAdminSecondFactor(
+  submittedCode: string
+): Promise<
+  | {
+      ok: true;
+      method: 'totp' | 'recovery';
+      matchedStep?: number;
+      remainingRecoveryCodes?: number;
+    }
+  | { ok: false; reason: 'invalid_code' | 'replay_blocked' | 'not_configured' }
+> {
+  const row = await archiveRepository.getMfaConfigRow();
+  const dbSecret = row.enabled ? decryptTotpSecret(row.encryptedSecret) : null;
+  const envSecret = getEnvTotpFallbackSecret();
+
+  // Confirmed user rule: Enrolled DB 2FA takes precedence over ADMIN_TOTP_SECRET env fallback
+  const activeSecret = dbSecret || envSecret;
+  if (!activeSecret) {
+    return { ok: false, reason: 'not_configured' };
+  }
+
+  const trimmed = String(submittedCode || '').trim();
+  const digitsOnly = trimmed.replace(/[\s-]+/g, '');
+
+  // 1. Check 6-digit numeric TOTP code + mandatory atomic anti-replay lock
+  if (/^\d{6}$/.test(digitsOnly)) {
+    const check = verifyTotpCode(activeSecret, digitsOnly);
+    if (!check.valid || check.matchedStep === null) {
+      return { ok: false, reason: 'invalid_code' };
+    }
+
+    const claimed = await archiveRepository.claimTotpStepAtomic(
+      check.matchedStep
+    );
+    if (!claimed) {
+      return { ok: false, reason: 'replay_blocked' };
+    }
+
+    return {
+      ok: true,
+      method: 'totp',
+      matchedStep: check.matchedStep,
+    };
+  }
+
+  // 2. Check single-use XXXX-XXXX backup recovery codes (available when DB 2FA is enrolled)
+  if (dbSecret && row.recoveryHashes.length > 0) {
+    const recCheck = verifyRecoveryCodeConstantTime(trimmed, row.recoveryHashes);
+    if (recCheck.valid && recCheck.matchedIndex >= 0) {
+      const remaining = row.recoveryHashes.filter(
+        (_, idx) => idx !== recCheck.matchedIndex
+      );
+      await archiveRepository.updateRecoveryHashes(remaining);
+      return {
+        ok: true,
+        method: 'recovery',
+        remainingRecoveryCodes: remaining.length,
+      };
+    }
+  }
+
+  return { ok: false, reason: 'invalid_code' };
+}
+
+export async function disableAdminTotpEnrollment(): Promise<AdminMfaStatusSnapshot> {
+  await archiveRepository.disableMfaConfig();
+  return getAdminMfaStatus();
 }
 
 // ==================== UNIVERSAL MUTATION CSRF & SESSION GUARD ====================

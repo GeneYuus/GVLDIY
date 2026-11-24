@@ -1,11 +1,23 @@
 // app/api/admin/actions/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import {
+  beginAdminTotpEnrollment,
+  checkAuthRateLimit,
   clearAdminSessionCookie,
+  clearAuthFailureCount,
+  confirmAdminTotpEnrollment,
+  disableAdminTotpEnrollment,
+  enforceMinElapsedMs,
   generateAdminPasswordHash,
+  getAdminMfaStatus,
+  getRequestIpHash,
+  recordFailedAuthAttempt,
   requireAdminSession,
   revokeAllAdminSessions,
+  verifyAdminSecondFactor,
+  verifyOrClaimAdminPasskey,
 } from '@/lib/dal/auth';
+import { readBoundedJsonBody } from '@/lib/security/publicRequestGuard';
 import { archiveRepository } from '@/lib/storage/repository';
 import { parseMultilineTimestamps } from '@/lib/media/resolveMediaUrl';
 import {
@@ -49,8 +61,106 @@ async function auditAndRespond(
   payload: Record<string, unknown>
 ) {
   await archiveRepository.recordAuditLog(actionName, targetId);
-  const auditLogs = await archiveRepository.listAuditLogs(40);
-  return NextResponse.json({ ok: true, ...payload, auditLogs });
+  const auditPage = await archiveRepository.queryAuditLogs({
+    filter: 'all',
+    page: 1,
+    pageSize: 50,
+  });
+  return NextResponse.json({
+    ok: true,
+    ...payload,
+    auditLogs: auditPage.logs,
+    auditTotal: auditPage.total,
+  });
+}
+
+async function verifyStepUpCredentials(
+  req: NextRequest,
+  passphrase: string,
+  verificationCode: string
+): Promise<
+  | { ok: true }
+  | { ok: false; response: NextResponse }
+> {
+  const startedAtMs = Date.now();
+  const ipHash = getRequestIpHash(req);
+  const rateCheck = await checkAuthRateLimit(ipHash);
+  if (!rateCheck.allowed) {
+    await enforceMinElapsedMs(startedAtMs, rateCheck.minDelayMs);
+    return {
+      ok: false,
+      response: NextResponse.json(
+        {
+          error: `Too many failed verification attempts. Retry in ${rateCheck.retryAfterSec}s.`,
+          retryAfterSec: rateCheck.retryAfterSec,
+        },
+        {
+          status: 429,
+          headers: { 'Retry-After': String(rateCheck.retryAfterSec) },
+        }
+      ),
+    };
+  }
+
+  const validPassphrase = await verifyOrClaimAdminPasskey(passphrase);
+  if (!validPassphrase) {
+    const failRes = await recordFailedAuthAttempt(ipHash);
+    await archiveRepository.recordAuditLog(
+      failRes.lockedNow ? 'LOCKOUT_TRIGGERED' : 'LOGIN_FAILED',
+      `stepup:${ipHash.slice(0, 12)}`
+    );
+    await enforceMinElapsedMs(startedAtMs, failRes.minDelayMs);
+    return {
+      ok: false,
+      response: NextResponse.json(
+        { error: 'Current curator passphrase is incorrect.' },
+        { status: failRes.lockedNow || failRes.globalBurstNow ? 429 : 401 }
+      ),
+    };
+  }
+
+  const secondFactor = await verifyAdminSecondFactor(verificationCode);
+  if (!secondFactor.ok) {
+    const failRes = await recordFailedAuthAttempt(ipHash);
+    const eventName =
+      secondFactor.reason === 'replay_blocked'
+        ? 'totp_replay_blocked'
+        : failRes.lockedNow
+        ? 'LOCKOUT_TRIGGERED'
+        : 'TOTP_FAILED';
+    await archiveRepository.recordAuditLog(
+      eventName,
+      `stepup:${ipHash.slice(0, 12)}`
+    );
+    await enforceMinElapsedMs(startedAtMs, failRes.minDelayMs);
+    return {
+      ok: false,
+      response: NextResponse.json(
+        {
+          error:
+            secondFactor.reason === 'replay_blocked'
+              ? 'This 6-digit code was already used. Wait for the next 30-second code.'
+              : 'Invalid 6-digit authenticator or backup recovery code.',
+        },
+        { status: failRes.lockedNow || failRes.globalBurstNow ? 429 : 401 }
+      ),
+    };
+  }
+
+  await clearAuthFailureCount(ipHash);
+  if (secondFactor.method === 'recovery') {
+    await archiveRepository.recordAuditLog(
+      'recovery_code_used',
+      `remaining:${secondFactor.remainingRecoveryCodes ?? 0}`
+    );
+  } else {
+    await archiveRepository.recordAuditLog(
+      'totp_verified',
+      `step:${secondFactor.matchedStep ?? 0}`
+    );
+  }
+
+  return { ok: true };
 }
 
 export async function POST(req: NextRequest) {
@@ -63,11 +173,22 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const boundedBody = await readBoundedJsonBody<Record<string, unknown>>(
+    req,
+    32768
+  );
+  if (!boundedBody.ok) {
+    return NextResponse.json(
+      { error: boundedBody.error },
+      { status: boundedBody.status }
+    );
+  }
+
   try {
-    const body = await req.json();
+    const body = boundedBody.data as Record<string, any>;
     const { action } = body;
 
-    // 0. Session Revocation & Passphrase Hash Generator (Iteration 1 Security)
+    // 0. Session Revocation, Passphrase Hash Generator & Two-Phase TOTP 2FA
     if (action === 'revoke-all-sessions') {
       const revokedCount = await revokeAllAdminSessions();
       await archiveRepository.recordAuditLog(
@@ -77,6 +198,131 @@ export async function POST(req: NextRequest) {
       const res = NextResponse.json({ ok: true, revokedCount });
       clearAdminSessionCookie(res, req);
       return res;
+    }
+
+    if (action === 'begin-totp-setup') {
+      const currentStatus = await getAdminMfaStatus();
+      if (currentStatus.dbEnabled) {
+        return NextResponse.json(
+          {
+            error:
+              'Authenticator 2FA is already active. Use Rotate Authenticator Device with your passphrase and current 2FA code.',
+          },
+          { status: 400 }
+        );
+      }
+      const setup = await beginAdminTotpEnrollment();
+      return NextResponse.json({
+        ok: true,
+        ...setup,
+      });
+    }
+
+    if (action === 'confirm-totp-setup') {
+      const totpCode =
+        typeof body.totpCode === 'string' ? body.totpCode.trim() : '';
+      if (!totpCode) {
+        return NextResponse.json(
+          { error: 'Enter the 6-digit code from your authenticator app.' },
+          { status: 400 }
+        );
+      }
+      const confirmed = await confirmAdminTotpEnrollment(totpCode, req);
+      if (!confirmed.ok) {
+        if (confirmed.replayBlocked) {
+          const ipHash = getRequestIpHash(req);
+          await archiveRepository.recordAuditLog(
+            'totp_replay_blocked',
+            `setup:${ipHash.slice(0, 12)}`
+          );
+        }
+        return NextResponse.json({ error: confirmed.error }, { status: 400 });
+      }
+      return auditAndRespond(
+        'totp_enrolled',
+        `revoked_other:${confirmed.revokedOtherSessions}`,
+        {
+          recoveryCodes: confirmed.recoveryCodes,
+          revokedOtherSessions: confirmed.revokedOtherSessions,
+          mfaStatus: confirmed.mfaStatus,
+        }
+      );
+    }
+
+    if (action === 'rotate-totp-setup') {
+      const passphrase =
+        typeof body.currentPassphrase === 'string'
+          ? body.currentPassphrase
+          : '';
+      const verificationCode =
+        typeof body.verificationCode === 'string'
+          ? body.verificationCode
+          : '';
+      if (!passphrase.trim() || !verificationCode.trim()) {
+        return NextResponse.json(
+          {
+            error:
+              'Current passphrase and a valid 6-digit TOTP or recovery code are required to rotate devices.',
+          },
+          { status: 400 }
+        );
+      }
+
+      const stepUp = await verifyStepUpCredentials(
+        req,
+        passphrase,
+        verificationCode
+      );
+      if (!stepUp.ok) {
+        return stepUp.response;
+      }
+
+      const setup = await beginAdminTotpEnrollment();
+      const auditPage = await archiveRepository.queryAuditLogs({
+        filter: 'all',
+        page: 1,
+        pageSize: 50,
+      });
+      return NextResponse.json({
+        ok: true,
+        ...setup,
+        auditLogs: auditPage.logs,
+        auditTotal: auditPage.total,
+      });
+    }
+
+    if (action === 'disable-totp') {
+      const passphrase =
+        typeof body.currentPassphrase === 'string'
+          ? body.currentPassphrase
+          : '';
+      const verificationCode =
+        typeof body.verificationCode === 'string'
+          ? body.verificationCode
+          : '';
+      if (!passphrase.trim() || !verificationCode.trim()) {
+        return NextResponse.json(
+          {
+            error:
+              'Current passphrase and a valid 6-digit TOTP or recovery code are required to disable 2FA.',
+          },
+          { status: 400 }
+        );
+      }
+
+      const stepUp = await verifyStepUpCredentials(
+        req,
+        passphrase,
+        verificationCode
+      );
+      if (!stepUp.ok) {
+        return stepUp.response;
+      }
+
+      const mfaStatus = await disableAdminTotpEnrollment();
+      return auditAndRespond('totp_disabled', 'admin_mfa_config', {
+        mfaStatus,
+      });
     }
 
     if (action === 'generate-password-hash') {
@@ -973,11 +1219,14 @@ export async function POST(req: NextRequest) {
         'Pass 6',
         'Pass 7',
         'Pass 8',
+        'Pass 9',
+        'Pass 10',
+        'Pass 11',
         'Hostinger',
         'Storage / CDN',
       ].includes(body.passPhase)
         ? body.passPhase
-        : 'Pass 6';
+        : 'Pass 10';
       const area: FutureTaskLedgerItem['area'] = [
         'Auth & Security',
         'Puck Visual Studio',

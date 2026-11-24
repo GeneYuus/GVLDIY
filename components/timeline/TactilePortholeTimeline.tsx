@@ -2,6 +2,13 @@
 'use client';
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  motion,
+  useMotionTemplate,
+  useMotionValue,
+  useReducedMotion,
+  useSpring,
+} from 'motion/react';
 import { TimelineEra } from '@/types/archive';
 import LiquidGlassStage from '@/components/fx/LiquidGlassStage';
 
@@ -14,6 +21,22 @@ export default function TactilePortholeTimeline({
 }: TactilePortholeTimelineProps) {
   const runwayRef = useRef<HTMLDivElement | null>(null);
   const [activeIdx, setActiveIdx] = useState(0);
+  const [visitedEras, setVisitedEras] = useState<Record<number, boolean>>({
+    0: true,
+    1: true,
+  });
+  const [failedImages, setFailedImages] = useState<Record<string, boolean>>({});
+
+  const prefersReducedMotion = useReducedMotion();
+  const pointerX = useMotionValue(26);
+  const pointerY = useMotionValue(18);
+  const sheenOpacity = useMotionValue(0.62);
+
+  const smoothX = useSpring(pointerX, { stiffness: 220, damping: 28, mass: 0.4 });
+  const smoothY = useSpring(pointerY, { stiffness: 220, damping: 28, mass: 0.4 });
+  const smoothOpacity = useSpring(sheenOpacity, { stiffness: 200, damping: 30 });
+
+  const circularSpecularBeam = useMotionTemplate`radial-gradient(180px circle at ${smoothX}% ${smoothY}%, var(--liquid-sheen-peak), transparent 70%)`;
 
   // Hide browser scrollbars while the chromeless analog timeline stage is mounted
   useEffect(() => {
@@ -47,7 +70,20 @@ export default function TactilePortholeTimeline({
         count - 1,
         Math.max(0, Math.round(progress * (count - 1)))
       );
-      setActiveIdx((prev) => (prev === nextIdx ? prev : nextIdx));
+      setActiveIdx((prev) => {
+        if (prev === nextIdx) return prev;
+        setVisitedEras((v) =>
+          v[nextIdx] && v[nextIdx - 1] && v[nextIdx + 1]
+            ? v
+            : {
+                ...v,
+                [Math.max(0, nextIdx - 1)]: true,
+                [nextIdx]: true,
+                [Math.min(count - 1, nextIdx + 1)]: true,
+              }
+        );
+        return nextIdx;
+      });
     };
 
     const onScroll = () => {
@@ -70,6 +106,12 @@ export default function TactilePortholeTimeline({
     (targetIdx: number) => {
       const clamped = Math.max(0, Math.min(eras.length - 1, targetIdx));
       setActiveIdx(clamped);
+      setVisitedEras((v) => ({
+        ...v,
+        [Math.max(0, clamped - 1)]: true,
+        [clamped]: true,
+        [Math.min(Math.max(0, eras.length - 1), clamped + 1)]: true,
+      }));
 
       const runway = runwayRef.current;
       if (!runway || eras.length <= 1) return;
@@ -89,7 +131,7 @@ export default function TactilePortholeTimeline({
     [eras.length]
   );
 
-  // Support clean keyboard arrow stepping between archival dates
+  // Support clean keyboard arrow stepping between archival eras
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement | null)?.tagName;
@@ -112,12 +154,33 @@ export default function TactilePortholeTimeline({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [activeIdx, eras.length, glideToEraIndex]);
 
+  const handlePortalPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (prefersReducedMotion) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const xPct = Math.max(
+      0,
+      Math.min(100, ((e.clientX - rect.left) / rect.width) * 100)
+    );
+    const yPct = Math.max(
+      0,
+      Math.min(100, ((e.clientY - rect.top) / rect.height) * 100)
+    );
+    pointerX.set(xPct);
+    pointerY.set(yPct);
+    sheenOpacity.set(0.95);
+  };
+
+  const handlePortalPointerLeave = () => {
+    if (prefersReducedMotion) return;
+    pointerX.set(26);
+    pointerY.set(18);
+    sheenOpacity.set(0.62);
+  };
+
   if (!eras.length) return null;
 
   const clampedActiveIdx = Math.min(activeIdx, eras.length - 1);
-  const prevEra = clampedActiveIdx > 0 ? eras[clampedActiveIdx - 1] : null;
-  const nextEra =
-    clampedActiveIdx < eras.length - 1 ? eras[clampedActiveIdx + 1] : null;
 
   // Smooth scroll runway with hidden scrollbars so analog trackpad/wheel/touch glides effortlessly
   const runwayHeightVh =
@@ -129,31 +192,25 @@ export default function TactilePortholeTimeline({
       style={{ minHeight: `${runwayHeightVh}vh` }}
       className="timeline-runway relative w-full"
     >
-      {/* Chromeless Viewport-Locked Stage: Stationary 3D Portal + Single Stacked Card Slot (Dates Only) */}
+      {/* Pure Two-Element Stage: True Circular Text-Free 3D Frosted Photo Portal + Centered Era Info Card */}
       <div className="timeline-knob-stage">
-        {/* Quiet Preceding Date Whisper (Dates-Only Temporal Context) */}
-        <div className="timeline-date-whisper-slot">
-          {prevEra ? (
-            <button
-              type="button"
-              onClick={() => glideToEraIndex(clampedActiveIdx - 1)}
-              className="timeline-date-whisper tabular-nums"
-              aria-label={`Return to ${prevEra.eraRange}`}
-            >
-              {prevEra.eraRange}
-            </button>
-          ) : null}
-        </div>
-
-        {/* Single Stationary Centered 3D Frosted Glass Porthole Lens with Analog Sliding Film-Gate Frames */}
-        <LiquidGlassStage
-          radius={999}
-          bezel={20}
-          thickness={16}
-          specular={0.78}
+        <div
           className="porthole-ring"
-          contentClassName="h-full"
+          onPointerMove={handlePortalPointerMove}
+          onPointerLeave={handlePortalPointerLeave}
         >
+          <motion.span
+            aria-hidden="true"
+            className="porthole-sheen"
+            style={
+              prefersReducedMotion
+                ? undefined
+                : {
+                    backgroundImage: circularSpecularBeam,
+                    opacity: smoothOpacity,
+                  }
+            }
+          />
           <div className="porthole-lens">
             {eras.map((era, idx) => {
               const isCurrent = idx === clampedActiveIdx;
@@ -162,6 +219,12 @@ export default function TactilePortholeTimeline({
                 : idx < clampedActiveIdx
                 ? 'is-past'
                 : 'is-upcoming';
+              const withinNeighborWindow =
+                Math.abs(idx - clampedActiveIdx) <= 1 || Boolean(visitedEras[idx]);
+              const showPhoto =
+                withinNeighborWindow &&
+                Boolean(era.portholeImageUrl) &&
+                !failedImages[era.id];
 
               return (
                 <div
@@ -169,32 +232,33 @@ export default function TactilePortholeTimeline({
                   aria-hidden={!isCurrent}
                   className={`portal-analog-slide ${slideClass}`}
                 >
-                  {era.portholeImageUrl ? (
+                  {showPhoto ? (
                     /* eslint-disable-next-line @next/next/no-img-element */
                     <img
                       src={era.portholeImageUrl}
                       alt={era.title}
                       referrerPolicy="no-referrer"
+                      loading={isCurrent ? 'eager' : 'lazy'}
+                      decoding="async"
                       className="w-full h-full object-cover block select-none"
                       draggable={false}
+                      onError={() =>
+                        setFailedImages((prev) => ({ ...prev, [era.id]: true }))
+                      }
                     />
                   ) : (
-                    <div className="w-full h-full flex items-center justify-center bg-[#0D1015] px-4 text-center font-mono text-xs text-slate-400 tabular-nums">
-                      {era.eraRange}
-                    </div>
+                    <div
+                      aria-hidden="true"
+                      className="porthole-aperture-fallback"
+                    />
                   )}
-                  <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 via-black/40 to-transparent pt-8 pb-3.5 px-4 text-center pointer-events-none">
-                    <span className="font-mono text-xs font-bold text-white tracking-wider tabular-nums">
-                      {era.eraRange}
-                    </span>
-                  </div>
                 </div>
               );
             })}
           </div>
-        </LiquidGlassStage>
+        </div>
 
-        {/* Single Centered Era Card Slot: Absolute Stacking, Active-Only Opacity & Pointer Events */}
+        {/* Single Centered Era Info Card Slot: Absolute Stacking, Active-Only Opacity & Pointer Events */}
         <div className="timeline-card-slot">
           {eras.map((era, idx) => {
             const isCurrent = idx === clampedActiveIdx;
@@ -221,7 +285,7 @@ export default function TactilePortholeTimeline({
                     <time className="block font-mono text-xs font-semibold tracking-wider text-[var(--accent)] mb-1.5 tabular-nums">
                       {era.eraRange}
                     </time>
-                    <h3 className="m-0 mb-2 font-[var(--font-display)] text-base sm:text-xl font-extrabold tracking-tight text-balance">
+                    <h3 className="plate-title m-0 mb-2 text-base sm:text-xl text-balance">
                       {era.title}
                     </h3>
                     <p className="m-0 text-xs sm:text-sm text-[var(--ink-2)] leading-relaxed max-w-[65ch]">
@@ -232,20 +296,6 @@ export default function TactilePortholeTimeline({
               </div>
             );
           })}
-        </div>
-
-        {/* Quiet Upcoming Date Whisper (Dates-Only Temporal Context) */}
-        <div className="timeline-date-whisper-slot">
-          {nextEra ? (
-            <button
-              type="button"
-              onClick={() => glideToEraIndex(clampedActiveIdx + 1)}
-              className="timeline-date-whisper tabular-nums"
-              aria-label={`Advance to ${nextEra.eraRange}`}
-            >
-              {nextEra.eraRange}
-            </button>
-          ) : null}
         </div>
       </div>
     </div>
