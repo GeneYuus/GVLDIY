@@ -1,6 +1,8 @@
 import type { NextConfig } from 'next';
 import { PHASE_DEVELOPMENT_SERVER } from 'next/constants';
 
+const DEV_BOOT_DEPLOYMENT_ID = `dev-${Date.now().toString(36)}`;
+
 export default function createNextConfig(phase: string): NextConfig {
   const isDevServer = phase === PHASE_DEVELOPMENT_SERVER;
 
@@ -24,6 +26,7 @@ export default function createNextConfig(phase: string): NextConfig {
   return {
     distDir: isDevServer ? '.next-dev' : '.next',
     output: isDevServer ? undefined : 'standalone',
+    deploymentId: isDevServer ? DEV_BOOT_DEPLOYMENT_ID : undefined,
     reactStrictMode: true,
     productionBrowserSourceMaps: false,
     eslint: {

@@ -751,6 +751,10 @@ html[data-contrast="dark"] .liquid-stage-shell {
   box-shadow: var(--glass-3d-shadow);
 }
 
+.puck-editorial-banner {
+  border-color: var(--banner-border-color, var(--grid-hairline-strong));
+}
+
 .glass-popover {
   background: var(--glass-heavy);
   backdrop-filter: var(--glass-blur);

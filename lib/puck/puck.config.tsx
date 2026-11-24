@@ -140,8 +140,10 @@ export const puckConfig: Config<ArchivePuckProps> = {
 
         return (
           <section
-            className="glass-panel p-5 sm:p-6 mb-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
-            style={{ borderColor: tone.border }}
+            className="glass-panel puck-editorial-banner p-5 sm:p-6 mb-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+            style={
+              { '--banner-border-color': tone.border } as React.CSSProperties
+            }
           >
             <div className="min-w-0 max-w-2xl">
               {eyebrow && (
